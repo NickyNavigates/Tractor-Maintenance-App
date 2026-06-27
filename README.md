@@ -1,4 +1,4 @@
-# 🚜 ShedLog — Maintenance Tracker
+# 🚜 Tractor Shed — Maintenance Tracker
 
 A simple, offline-capable app for tracking maintenance on your **tractors, implements, tools, and vehicles**. Log completed service, set up recurring schedules (by engine hours, mileage, or time), and see at a glance what's due or overdue.
 
@@ -15,7 +15,7 @@ Once the app is published to a web address (see **Publishing** below), installin
 3. Scroll down and tap **Add to Home Screen**.
 4. Tap **Add** in the top-right corner.
 
-You'll now have a **ShedLog** icon on your home screen. Open it and it runs like a normal app — full screen, offline, and your data stays on your phone.
+You'll now have a **Tractor Shed** icon on your home screen. Open it and it runs like a normal app — full screen, offline, and your data stays on your phone.
 
 > **Where's my data?** Everything is saved locally on your device. Nothing is uploaded anywhere. (Because of that, deleting the app or clearing Safari's data will erase your records — so use the built-in backup below to keep a copy.)
 
@@ -23,7 +23,7 @@ You'll now have a **ShedLog** icon on your home screen. Open it and it runs like
 
 On the **Dashboard** there's a **Data & Backup** section:
 
-- **Export / Save to Files** — creates a backup file (`shedlog-backup-YYYY-MM-DD.json`). On iPhone, the share sheet pops up and you tap **Save to Files** to store it in iCloud Drive or "On My iPhone". You can also AirDrop or email it from there.
+- **Export / Save to Files** — creates a backup file (`tractor-shed-backup-YYYY-MM-DD.json`), including your photos and stored manuals. On iPhone, the share sheet pops up and you tap **Save to Files** to store it in iCloud Drive or "On My iPhone". You can also AirDrop or email it from there.
 - **Restore from Backup** — pick a backup file (from the Files app) to load all your equipment, schedules, and history back. This also lets you move your data to a new phone.
 
 The Export row also shows when you last backed up (e.g. *"Last backed up 3 days ago"*), and the dashboard shows a **"Time to back up"** reminder if you've never backed up or it's been more than two weeks. Tap **Back Up Now** to save, or **Later** to snooze it for a week.
@@ -64,7 +64,10 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Parts linked to schedules** — attach specific parts to a service schedule. When you log that service, the schedule prefills the entry and its parts are pre-checked; the Shopping List then lists exactly those parts when it's due.
 - **Log against a schedule** — when logging maintenance, pick one of the machine's schedules to prefill the work, auto-select its parts, and reset its countdown in one step.
 - **Part costs** — give a part a unit cost to see estimated shopping totals.
-- **Photos & locations** — snap and store reference photos per machine (e.g. where each zerk fitting is) with a location note. Photos are saved on-device in IndexedDB and are included in backups.
+- **Instructions per task** — write step-by-step how-to notes (torque specs, fill amounts, tips) on any service schedule; they show when you view the schedule and when you log it.
+- **Photos & locations** — snap reference photos for **equipment, individual schedules, or individual parts** (e.g. where each zerk fitting is) with a location note. Saved on-device in IndexedDB and included in backups.
+- **Manuals & documents** — store operator/parts manuals (PDF or image) per machine; tap to open. Included in backups.
+- **All Parts list** — one editable list of every part across all your equipment, reachable from the Equipment tab.
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.
@@ -75,7 +78,7 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 ## 🛠️ Tech notes
 
 - Plain HTML, CSS, and vanilla JavaScript — no frameworks, no dependencies, no build step.
-- Data persistence via the browser's `localStorage`.
+- Data persistence via the browser's `localStorage`; photos and manuals stored in `IndexedDB`.
 - Offline support via a service worker (`sw.js`) caching the app shell.
 - Designed mobile-first with iOS safe-area insets, light/dark mode, and a native-feeling tab bar.
 

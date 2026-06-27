@@ -1,6 +1,6 @@
 {
-  "name": "ShedLog — Maintenance Tracker",
-  "short_name": "ShedLog",
+  "name": "Tractor Shed — Maintenance Tracker",
+  "short_name": "Tractor Shed",
   "description": "Track maintenance for tractors, implements, tools and vehicles.",
   "start_url": ".",
   "scope": ".",

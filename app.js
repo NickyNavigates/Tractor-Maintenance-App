@@ -1,4 +1,4 @@
-/* ShedLog — equipment maintenance tracker (PWA, offline, no backend).
+/* Tractor Shed — equipment maintenance tracker (PWA, offline, no backend).
    Data is stored locally in the browser via localStorage. */
 
 'use strict';
@@ -40,16 +40,20 @@ const BACKUP_SNOOZE_DAYS = 7;    // how long "Later" hides the reminder
 
 const STORE_KEY = 'shedlog.v1';
 
-const EMPTY_DATA = { equipment: [], records: [], tasks: [], consumables: [], photos: [] };
+const EMPTY_DATA = { equipment: [], records: [], tasks: [], consumables: [], photos: [], manuals: [] };
 
 const Store = {
-  data: { equipment: [], records: [], tasks: [], consumables: [], photos: [] },
+  data: { equipment: [], records: [], tasks: [], consumables: [], photos: [], manuals: [] },
 
   load() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
       if (raw) this.data = Object.assign({}, EMPTY_DATA, JSON.parse(raw));
     } catch (e) { console.error('load failed', e); }
+    // migrate legacy equipment-only photos to the polymorphic owner shape
+    this.data.photos.forEach(p => {
+      if (!p.ownerType) { p.ownerType = 'equipment'; p.ownerId = p.equipmentId; }
+    });
   },
   save() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(this.data)); }
@@ -65,13 +69,15 @@ const Store = {
     this.save();
   },
   deleteEquipment(id) {
-    // remove any stored photo blobs for this equipment (best effort, async)
-    this.data.photos.filter(p => p.equipmentId === id).forEach(p => ImageDB.del(p.id).catch(() => {}));
+    // remove any stored photo/manual blobs for this equipment (best effort, async)
+    this.data.photos.filter(p => p.equipmentId === id).forEach(p => BlobDB.del('img', p.id).catch(() => {}));
+    this.data.manuals.filter(m => m.equipmentId === id).forEach(m => BlobDB.del('file', m.id).catch(() => {}));
     this.data.equipment   = this.data.equipment.filter(e => e.id !== id);
     this.data.records     = this.data.records.filter(r => r.equipmentId !== id);
     this.data.tasks       = this.data.tasks.filter(t => t.equipmentId !== id);
     this.data.consumables = this.data.consumables.filter(c => c.equipmentId !== id);
     this.data.photos      = this.data.photos.filter(p => p.equipmentId !== id);
+    this.data.manuals     = this.data.manuals.filter(m => m.equipmentId !== id);
     this.save();
   },
 
@@ -84,7 +90,12 @@ const Store = {
     if (i >= 0) this.data.tasks[i] = t; else this.data.tasks.push(t);
     this.save();
   },
-  deleteTask(id) { this.data.tasks = this.data.tasks.filter(t => t.id !== id); this.save(); },
+  deleteTask(id) {
+    this.data.photos.filter(p => p.ownerType === 'task' && p.ownerId === id).forEach(p => BlobDB.del('img', p.id).catch(() => {}));
+    this.data.photos = this.data.photos.filter(p => !(p.ownerType === 'task' && p.ownerId === id));
+    this.data.tasks = this.data.tasks.filter(t => t.id !== id);
+    this.save();
+  },
 
   // records (completed maintenance log)
   records() { return this.data.records; },
@@ -103,50 +114,68 @@ const Store = {
     if (i >= 0) this.data.consumables[i] = c; else this.data.consumables.push(c);
     this.save();
   },
-  deleteConsumable(id) { this.data.consumables = this.data.consumables.filter(c => c.id !== id); this.save(); },
+  deleteConsumable(id) {
+    this.data.photos.filter(p => p.ownerType === 'consumable' && p.ownerId === id).forEach(p => BlobDB.del('img', p.id).catch(() => {}));
+    this.data.photos = this.data.photos.filter(p => !(p.ownerType === 'consumable' && p.ownerId === id));
+    this.data.consumables = this.data.consumables.filter(c => c.id !== id);
+    this.save();
+  },
 
-  // photos (reference images with a location/caption, e.g. zerk fittings)
-  photosFor(eqId) { return this.data.photos.filter(p => p.equipmentId === eqId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')); },
+  // photos (reference images with a location/caption) — owned by equipment, a task, or a part
+  photosFor(ownerType, ownerId) {
+    return this.data.photos.filter(p => p.ownerType === ownerType && p.ownerId === ownerId)
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  },
   getPhoto(id) { return this.data.photos.find(p => p.id === id); },
   addPhoto(p) { this.data.photos.push(p); this.save(); },
   updatePhoto(p) { const i = this.data.photos.findIndex(x => x.id === p.id); if (i >= 0) this.data.photos[i] = p; this.save(); },
-  deletePhoto(id) { this.data.photos = this.data.photos.filter(p => p.id !== id); ImageDB.del(id).catch(() => {}); this.save(); },
+  deletePhoto(id) { this.data.photos = this.data.photos.filter(p => p.id !== id); BlobDB.del('img', id).catch(() => {}); this.save(); },
+
+  // manuals (PDF/image documents per equipment)
+  manualsFor(eqId) { return this.data.manuals.filter(m => m.equipmentId === eqId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')); },
+  getManual(id) { return this.data.manuals.find(m => m.id === id); },
+  addManual(m) { this.data.manuals.push(m); this.save(); },
+  deleteManual(id) { this.data.manuals = this.data.manuals.filter(m => m.id !== id); BlobDB.del('file', id).catch(() => {}); this.save(); },
 };
 
-/* IndexedDB store for photo blobs (kept out of localStorage, which is too small for images). */
-const ImageDB = {
+/* IndexedDB store for binary blobs (photos + manuals), kept out of localStorage. */
+const BlobDB = {
   _db: null,
   open() {
     return new Promise((resolve, reject) => {
       if (this._db) return resolve(this._db);
       if (!('indexedDB' in window)) return reject(new Error('no indexeddb'));
-      const req = indexedDB.open('shedlog-images', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('img');
+      const req = indexedDB.open('shedlog-images', 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('img')) db.createObjectStore('img');
+        if (!db.objectStoreNames.contains('file')) db.createObjectStore('file');
+      };
       req.onsuccess = () => { this._db = req.result; resolve(this._db); };
       req.onerror = () => reject(req.error);
     });
   },
-  async put(id, dataUrl) {
+  async put(store, id, dataUrl) {
     const db = await this.open();
     return new Promise((res, rej) => {
-      const tx = db.transaction('img', 'readwrite');
-      tx.objectStore('img').put(dataUrl, id);
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).put(dataUrl, id);
       tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
     });
   },
-  async get(id) {
+  async get(store, id) {
     const db = await this.open();
     return new Promise((res, rej) => {
-      const tx = db.transaction('img', 'readonly');
-      const r = tx.objectStore('img').get(id);
+      const tx = db.transaction(store, 'readonly');
+      const r = tx.objectStore(store).get(id);
       r.onsuccess = () => res(r.result || null); r.onerror = () => rej(r.error);
     });
   },
-  async del(id) {
+  async del(store, id) {
     const db = await this.open();
     return new Promise((res, rej) => {
-      const tx = db.transaction('img', 'readwrite');
-      tx.objectStore('img').delete(id);
+      const tx = db.transaction(store, 'readwrite');
+      tx.objectStore(store).delete(id);
       tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
     });
   },
@@ -299,14 +328,17 @@ function router() {
   const path = currentRoute();
   const view = $('#view');
   view.scrollTop = 0;
+  closeModal(); // dismiss any open sheet when the route changes
 
-  let render, arg = null, title = 'ShedLog', showBack = false, showAdd = true;
+  let render, arg = null, title = 'Tractor Shed', showBack = false, showAdd = true;
 
   if (path.startsWith('/equipment/')) {
     arg = decodeURIComponent(path.slice('/equipment/'.length));
     render = renderEquipmentDetail; showBack = true; showAdd = false;
   } else if (path === '/equipment') {
     render = renderEquipmentList; title = 'Equipment';
+  } else if (path === '/parts') {
+    render = renderAllParts; title = 'All Parts'; showBack = true;
   } else if (path === '/shopping') {
     render = renderShopping; title = 'Shopping List'; showAdd = false;
   } else if (path === '/history') {
@@ -355,7 +387,7 @@ function statusPill(st) {
 function renderDashboard(view) {
   const eqs = Store.equipment();
   if (eqs.length === 0) {
-    emptyState(view, '🚜', 'Welcome to ShedLog',
+    emptyState(view, '🚜', 'Welcome to Tractor Shed',
       'Track maintenance for your tractors, implements, tools and vehicles. Start by adding your first piece of equipment.',
       'Add Equipment', () => openEquipmentForm());
     view.appendChild(el('div', { class: 'center', style: 'margin-top:4px' },
@@ -433,19 +465,23 @@ function renderDashboard(view) {
 // Export all data as a JSON file. On iPhone the share sheet offers "Save to Files".
 async function exportData() {
   const stamp = new Date().toISOString().slice(0, 10);
-  const filename = `shedlog-backup-${stamp}.json`;
-  // Pull photo image data out of IndexedDB so backups are complete.
+  const filename = `tractor-shed-backup-${stamp}.json`;
+  // Pull photo + manual blobs out of IndexedDB so backups are complete.
   const images = {};
   for (const p of Store.data.photos) {
-    try { const d = await ImageDB.get(p.id); if (d) images[p.id] = d; } catch (e) { /* skip */ }
+    try { const d = await BlobDB.get('img', p.id); if (d) images[p.id] = d; } catch (e) { /* skip */ }
   }
-  const payload = JSON.stringify({ app: 'ShedLog', version: 1, exportedAt: new Date().toISOString(), ...Store.data, images }, null, 2);
+  const files = {};
+  for (const m of Store.data.manuals) {
+    try { const d = await BlobDB.get('file', m.id); if (d) files[m.id] = d; } catch (e) { /* skip */ }
+  }
+  const payload = JSON.stringify({ app: 'Tractor Shed', version: 1, exportedAt: new Date().toISOString(), ...Store.data, images, files }, null, 2);
 
   // Preferred path on iOS: native share sheet with a file attachment.
   try {
     const file = new File([payload], filename, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: 'ShedLog Backup' });
+      await navigator.share({ files: [file], title: 'Tractor Shed Backup' });
       Meta.markBackedUp();
       router();
       return;
@@ -520,8 +556,10 @@ function importData() {
         const parsed = JSON.parse(reader.result);
         if (!parsed || !Array.isArray(parsed.equipment)) throw new Error('invalid');
         const photoCount = (parsed.photos || []).length;
+        const manualCount = (parsed.manuals || []).length;
         const counts = `${parsed.equipment.length} item(s), ${(parsed.records || []).length} record(s)`
-          + (photoCount ? `, ${photoCount} photo(s)` : '');
+          + (photoCount ? `, ${photoCount} photo(s)` : '')
+          + (manualCount ? `, ${manualCount} doc(s)` : '');
         if (!confirm(`Restore this backup (${counts})?\n\nThis replaces ALL data currently on this device.`)) return;
         Store.data = {
           equipment: parsed.equipment || [],
@@ -529,19 +567,25 @@ function importData() {
           tasks: parsed.tasks || [],
           consumables: parsed.consumables || [],
           photos: parsed.photos || [],
+          manuals: parsed.manuals || [],
         };
         Store.save();
-        // restore photo image blobs into IndexedDB
+        // restore photo + manual blobs into IndexedDB
         if (parsed.images) {
           for (const [id, dataUrl] of Object.entries(parsed.images)) {
-            try { await ImageDB.put(id, dataUrl); } catch (e) { /* skip */ }
+            try { await BlobDB.put('img', id, dataUrl); } catch (e) { /* skip */ }
+          }
+        }
+        if (parsed.files) {
+          for (const [id, dataUrl] of Object.entries(parsed.files)) {
+            try { await BlobDB.put('file', id, dataUrl); } catch (e) { /* skip */ }
           }
         }
         toast('Backup restored');
         navigate('#/dashboard');
         router();
       } catch (e) {
-        alert('That file is not a valid ShedLog backup.');
+        alert('That file is not a valid Tractor Shed backup.');
       }
     };
     reader.onerror = () => alert('Could not read that file.');
@@ -597,7 +641,39 @@ function renderEquipmentList(view) {
     inCat.forEach(eq => card.appendChild(equipmentRow(eq)));
     view.appendChild(card);
   });
+  // Entry to the global parts list
+  view.appendChild(el('div', { class: 'spacer' }));
+  view.appendChild(el('div', { class: 'card' },
+    el('div', { class: 'row', onclick: () => navigate('#/parts') },
+      el('span', { class: 'emoji' }, '🧰'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'All Parts'),
+        el('div', { class: 'secondary' }, `${Store.data.consumables.length} part(s) across all equipment`)),
+      el('span', { class: 'chev' }, '›'))));
   return { title: 'Equipment' };
+}
+
+// Global, editable list of every part across all equipment.
+function renderAllParts(view) {
+  const all = Store.data.consumables;
+  if (!all.length) {
+    emptyState(view, '🧰', 'No parts yet',
+      'Add consumables and parts to your equipment — oils, filters, belts, and more. They all show up here in one editable list.',
+      Store.equipment().length ? 'Add a Part' : null, () => addPartChooseEquipment());
+    return { title: 'All Parts' };
+  }
+  // group by equipment
+  Store.equipment().forEach(eq => {
+    const items = all.filter(c => c.equipmentId === eq.id)
+      .slice().sort((a, b) => CONSUMABLE_ORDER.indexOf(a.type) - CONSUMABLE_ORDER.indexOf(b.type));
+    if (!items.length) return;
+    view.appendChild(el('div', { class: 'section-title' }, `${CATEGORIES[eq.category].emoji} ${eq.name}`));
+    const card = el('div', { class: 'card' });
+    items.forEach(c => card.appendChild(consumableRow(c)));
+    view.appendChild(card);
+  });
+  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:14px' }, 'Tap a part to edit it, or use ＋ to add one.'));
+  return { title: 'All Parts' };
 }
 
 function renderEquipmentDetail(view, id) {
@@ -637,18 +713,16 @@ function renderEquipmentDetail(view, id) {
   const actions = el('div', { class: 'stack' },
     el('button', { class: 'btn', onclick: () => openRecordForm(eq.id) }, '＋ Log Maintenance'),
     el('button', { class: 'btn secondary', onclick: () => openTaskForm(eq.id) }, '＋ Add Service Schedule'),
-    el('button', { class: 'btn secondary', onclick: () => openConsumableForm(eq.id) }, '＋ Add Consumable / Part'),
-    el('button', { class: 'btn secondary', onclick: () => addPhotoFlow(eq.id) }, '＋ Add Photo'));
+    el('button', { class: 'btn secondary', onclick: () => openConsumableForm(eq.id) }, '＋ Add Consumable / Part'));
   view.appendChild(actions);
 
   // Photos & locations (e.g. zerk fittings)
-  const photos = Store.photosFor(eq.id);
-  if (photos.length) {
-    view.appendChild(el('div', { class: 'section-title' }, 'Photos & Locations'));
-    const grid = el('div', { class: 'photo-grid' });
-    photos.forEach(p => grid.appendChild(photoThumb(p)));
-    view.appendChild(grid);
-  }
+  view.appendChild(el('div', { class: 'section-title' }, 'Photos & Locations'));
+  view.appendChild(photoManager('equipment', eq.id, eq.id, () => router()));
+
+  // Manuals & documents
+  view.appendChild(el('div', { class: 'section-title' }, 'Manuals & Documents'));
+  view.appendChild(manualManager(eq.id));
 
   // Schedules
   const tasks = Store.tasksFor(eq.id)
@@ -913,16 +987,29 @@ function openRestock(c) {
 
 /* ------------------------------ Photos ------------------------------- */
 
-function photoThumb(p) {
+// A reusable photos block (grid of thumbnails + Add button) for any owner.
+// onDone() is called after add/edit/delete so the caller can refresh its view.
+function photoManager(ownerType, ownerId, equipmentId, onDone) {
+  const wrap = el('div', {});
+  const grid = el('div', { class: 'photo-grid' });
+  Store.photosFor(ownerType, ownerId).forEach(p => grid.appendChild(photoThumb(p, onDone)));
+  wrap.append(
+    grid,
+    el('button', { class: 'btn small secondary', style: 'width:auto;margin-top:10px',
+      onclick: () => addPhotoFlow(ownerType, ownerId, equipmentId, onDone) }, '＋ Add Photo'));
+  return wrap;
+}
+
+function photoThumb(p, onDone) {
   const img = el('img', { alt: p.caption || 'photo', loading: 'lazy' });
-  ImageDB.get(p.id).then(d => { if (d) img.src = d; }).catch(() => {});
-  return el('div', { class: 'photo-tile', onclick: () => openPhotoView(p) },
+  BlobDB.get('img', p.id).then(d => { if (d) img.src = d; }).catch(() => {});
+  return el('div', { class: 'photo-tile', onclick: () => openPhotoView(p, onDone) },
     img,
     p.caption ? el('div', { class: 'photo-cap' }, p.caption) : null);
 }
 
 // Take/choose a photo, downscale it, then open the editor to add a location note.
-function addPhotoFlow(eqId) {
+function addPhotoFlow(ownerType, ownerId, equipmentId, onDone) {
   const input = el('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none' });
   document.body.appendChild(input);
   input.addEventListener('change', async () => {
@@ -932,18 +1019,19 @@ function addPhotoFlow(eqId) {
     toast('Processing photo…');
     try {
       const dataUrl = await fileToCompressedDataURL(f);
-      openPhotoEditor(eqId, null, dataUrl);
+      openPhotoEditor({ ownerType, ownerId, equipmentId }, null, dataUrl, onDone);
     } catch (e) { alert('Could not read that image.'); }
   });
   input.click();
 }
 
-function openPhotoEditor(eqId, existing, newDataUrl) {
+function openPhotoEditor(owner, existing, newDataUrl, onDone) {
+  const done = onDone || router;
   openModal((sheet) => {
     const capI = el('input', { type: 'text', value: existing?.caption || '', placeholder: 'e.g. Front axle zerk — behind LH wheel' });
     const preview = el('img', { class: 'photo-preview' });
     if (newDataUrl) preview.src = newDataUrl;
-    else if (existing) ImageDB.get(existing.id).then(d => { if (d) preview.src = d; }).catch(() => {});
+    else if (existing) BlobDB.get('img', existing.id).then(d => { if (d) preview.src = d; }).catch(() => {});
 
     const save = async () => {
       if (existing) {
@@ -951,11 +1039,12 @@ function openPhotoEditor(eqId, existing, newDataUrl) {
         Store.updatePhoto(existing);
       } else {
         const id = uid();
-        try { await ImageDB.put(id, newDataUrl); }
+        try { await BlobDB.put('img', id, newDataUrl); }
         catch (e) { alert('Could not save the photo on this device.'); return; }
-        Store.addPhoto({ id, equipmentId: eqId, caption: capI.value.trim(), createdAt: new Date().toISOString() });
+        Store.addPhoto({ id, ownerType: owner.ownerType, ownerId: owner.ownerId,
+          equipmentId: owner.equipmentId, caption: capI.value.trim(), createdAt: new Date().toISOString() });
       }
-      closeModal(); toast('Photo saved'); router();
+      closeModal(); toast('Photo saved'); done();
     };
 
     sheet.append(
@@ -964,25 +1053,101 @@ function openPhotoEditor(eqId, existing, newDataUrl) {
       el('div', { class: 'spacer' }),
       field('Location / note', capI, 'Describe where this is so you can find it later.'),
       existing ? el('button', { class: 'btn danger', onclick: () => {
-        if (confirm('Delete this photo?')) { Store.deletePhoto(existing.id); closeModal(); toast('Photo deleted'); router(); }
+        if (confirm('Delete this photo?')) { Store.deletePhoto(existing.id); closeModal(); toast('Photo deleted'); done(); }
       } }, 'Delete Photo') : null,
     );
   });
 }
 
-function openPhotoView(p) {
+function openPhotoView(p, onDone) {
+  const done = onDone || router;
   openModal((sheet) => {
     const img = el('img', { class: 'photo-preview' });
-    ImageDB.get(p.id).then(d => { if (d) img.src = d; }).catch(() => {});
+    BlobDB.get('img', p.id).then(d => { if (d) img.src = d; }).catch(() => {});
     sheet.append(
       el('div', { class: 'sheet-head' },
-        el('button', { class: 'link plain', onclick: () => { closeModal(); openPhotoEditor(p.equipmentId, p, null); } }, 'Edit'),
+        el('button', { class: 'link plain', onclick: () => { closeModal(); openPhotoEditor(p, p, null, done); } }, 'Edit'),
         el('h3', {}, 'Photo'),
         el('button', { class: 'link plain', onclick: closeModal }, 'Done')),
       img,
       p.caption ? el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.4;margin-top:12px' }, p.caption) : null,
     );
   });
+}
+
+/* ------------------------------ Manuals ------------------------------ */
+
+function fmtBytes(n) {
+  if (!n) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+function dataURLtoBlob(dataUrl) {
+  const [head, b64] = dataUrl.split(',');
+  const mime = (head.match(/:(.*?);/) || [])[1] || 'application/octet-stream';
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+function manualManager(eqId) {
+  const wrap = el('div', {});
+  const manuals = Store.manualsFor(eqId);
+  if (manuals.length) {
+    const card = el('div', { class: 'card' });
+    manuals.forEach(m => {
+      const isPdf = (m.mime || '').includes('pdf') || /\.pdf$/i.test(m.name || '');
+      card.appendChild(el('div', { class: 'row', onclick: () => openManual(m) },
+        el('span', { class: 'emoji' }, isPdf ? '📄' : '🖼️'),
+        el('div', { class: 'grow' },
+          el('div', { class: 'primary' }, m.name || 'Document'),
+          el('div', { class: 'secondary' }, (m.size ? fmtBytes(m.size) + ' · ' : '') + 'tap to open')),
+        el('button', { class: 'btn small secondary', style: 'padding:7px 10px;margin-left:8px',
+          onclick: (e) => { e.stopPropagation(); if (confirm('Delete this document?')) { Store.deleteManual(m.id); toast('Document deleted'); router(); } } }, 'Delete')));
+    });
+    wrap.appendChild(card);
+  }
+  wrap.appendChild(el('button', { class: 'btn small secondary', style: 'width:auto;margin-top:10px',
+    onclick: () => addManualFlow(eqId, () => router()) }, '＋ Add Manual / Document'));
+  return wrap;
+}
+
+function addManualFlow(eqId, onDone) {
+  const input = el('input', { type: 'file', accept: 'application/pdf,image/*', style: 'display:none' });
+  document.body.appendChild(input);
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    input.remove();
+    if (!f) return;
+    if (f.size > 25 * 1024 * 1024 &&
+        !confirm(`This file is ${fmtBytes(f.size)} and will make your backups large. Add it anyway?`)) return;
+    toast('Saving document…');
+    const reader = new FileReader();
+    reader.onerror = () => alert('Could not read that file.');
+    reader.onload = async () => {
+      const id = uid();
+      try { await BlobDB.put('file', id, reader.result); }
+      catch (e) { alert('Could not save the document on this device.'); return; }
+      Store.addManual({ id, equipmentId: eqId, name: f.name || 'Document', mime: f.type || '', size: f.size, createdAt: new Date().toISOString() });
+      toast('Document saved'); (onDone || router)();
+    };
+    reader.readAsDataURL(f);
+  });
+  input.click();
+}
+
+async function openManual(m) {
+  toast('Opening…');
+  try {
+    const data = await BlobDB.get('file', m.id);
+    if (!data) { alert('That file is no longer stored on this device.'); return; }
+    const url = URL.createObjectURL(dataURLtoBlob(data));
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) { alert('Could not open the file.'); }
 }
 
 async function shareShoppingList(low, serviceParts) {
@@ -995,7 +1160,7 @@ async function shareShoppingList(low, serviceParts) {
     if (eq) parts.push('— ' + eq.name);
     return '  • ' + parts.join(' ');
   };
-  let txt = 'Shopping list — ShedLog\n';
+  let txt = 'Shopping list — Tractor Shed\n';
   if (low.length) txt += '\nLow / out of stock:\n' + low.map(line).join('\n') + '\n';
   if (serviceParts.length) txt += '\nFor upcoming service:\n' + serviceParts.map(line).join('\n') + '\n';
 
@@ -1144,13 +1309,14 @@ function openTaskForm(eqId, existing) {
   const task = existing || {
     id: uid(), equipmentId: eqId, title: '',
     intervalType: eq.usageUnit === 'none' ? 'days' : 'usage',
-    intervalValue: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0, partIds: [],
+    intervalValue: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0, partIds: [], instructions: '',
   };
   let intervalType = task.intervalType;
   const parts = partsChecklist(eqId, task.partIds);
 
   openModal((sheet) => {
     const titleI = el('input', { type: 'text', value: task.title, placeholder: 'e.g. Engine oil & filter' });
+    const instrI = el('textarea', { placeholder: 'Step-by-step how-to, torque specs, fill amounts, tips…', style: 'min-height:110px' }, task.instructions || '');
     const valueI = el('input', { type: 'number', value: task.intervalValue, placeholder: '0', inputmode: 'decimal', step: 'any' });
     const lastDateI = el('input', { type: 'date', value: task.lastDoneDate || todayISO() });
     const lastUsageI = el('input', { type: 'number', value: task.lastDoneUsage ?? '', placeholder: '0', inputmode: 'decimal', step: 'any' });
@@ -1198,6 +1364,7 @@ function openTaskForm(eqId, existing) {
         lastDoneDate: lastDateI.value || todayISO(),
         lastDoneUsage: intervalType === 'usage' ? Number(lastUsageI.value || 0) : (task.lastDoneUsage ?? 0),
         partIds: parts.getSelected(),
+        instructions: instrI.value.trim(),
       });
       closeModal();
       toast(isEdit ? 'Schedule saved' : 'Schedule added');
@@ -1215,6 +1382,7 @@ function openTaskForm(eqId, existing) {
         el('label', {}, 'Parts this service needs'),
         parts.node,
         el('div', { class: 'hint' }, 'Linked parts are pre-checked when you log this service, and listed under it on the Shopping List.')),
+      field('Instructions', instrI, 'How to do this job — shown when you view or log the service.'),
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
         if (confirm('Delete this schedule?')) { Store.deleteTask(task.id); closeModal(); toast('Schedule deleted'); router(); }
       } }, 'Delete Schedule') : null,
@@ -1292,6 +1460,9 @@ function openConsumableForm(eqId, existing) {
       field('Unit cost', costI, 'Optional — used to estimate shopping totals.'),
       el('div', { class: 'hint', style: 'margin:-8px 4px 14px' }, 'Leave “On hand” blank to skip stock tracking. You’ll get a shopping-list alert when on-hand drops to the reorder level (or to 0).'),
       field('Notes', notesI),
+      isEdit ? el('div', { class: 'field' },
+        el('label', {}, 'Photos'),
+        photoManager('consumable', c.id, eqId, () => { closeModal(); openConsumableForm(eqId, Store.getConsumable(c.id)); })) : null,
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
         if (confirm('Delete this part?')) { Store.deleteConsumable(c.id); closeModal(); toast('Part deleted'); router(); }
       } }, 'Delete Part') : null,
@@ -1315,6 +1486,12 @@ function openTaskActions(task) {
             el('div', { class: 'primary' }, eq.name),
             el('div', { class: 'secondary' }, intervalText(task) + ' · next ' + st.due)),
           statusPill(st))),
+      task.instructions ? el('div', { class: 'field' },
+        el('label', {}, 'Instructions'),
+        el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.5;white-space:pre-wrap' }, task.instructions)) : null,
+      el('div', { class: 'field' },
+        el('label', {}, 'Photos'),
+        photoManager('task', task.id, task.equipmentId, () => { closeModal(); openTaskActions(task); })),
       el('div', { class: 'stack' },
         el('button', { class: 'btn', onclick: () => { closeModal(); markTaskDone(task); } }, '✓ Mark Done Now'),
         el('button', { class: 'btn secondary', onclick: () => { closeModal(); openTaskForm(eq.id, task); } }, 'Edit Schedule'),
@@ -1370,11 +1547,16 @@ function openRecordForm(eqId, opts = {}) {
       const pc = partControls.find(x => x.c.id === cid);
       if (pc) { pc.chk.checked = on; pc.qtyN.disabled = !on; }
     };
+    const instrBox = el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.5;white-space:pre-wrap;margin-top:-6px;margin-bottom:14px', hidden: true });
     const applyTask = (tid) => {
       const t = tasks.find(x => x.id === tid);
-      if (!t) return;
-      titleI.value = t.title;
-      (t.partIds || []).forEach(cid => setPartChecked(cid, true));
+      if (t) {
+        titleI.value = t.title;
+        (t.partIds || []).forEach(cid => setPartChecked(cid, true));
+      }
+      // show this schedule's instructions, if any
+      if (t && t.instructions) { instrBox.textContent = t.instructions; instrBox.hidden = false; }
+      else { instrBox.textContent = ''; instrBox.hidden = true; }
     };
     const schedSelect = el('select', {},
       el('option', { value: '' }, '— General / no schedule —'),
@@ -1437,6 +1619,7 @@ function openRecordForm(eqId, opts = {}) {
       sheetHead('Log Maintenance', save),
       el('div', { class: 'muted', style: 'margin:0 4px 12px' }, eq.name),
       tasks.length ? field('For schedule', schedSelect, 'Pick a schedule to prefill this and mark it done.') : null,
+      instrBox,
       field('What was done', titleI),
       field('Date', dateI),
       eq.usageUnit !== 'none' ? field(`${unit.charAt(0).toUpperCase() + unit.slice(1)} reading`, usageI) : null,
@@ -1494,9 +1677,29 @@ function handleAdd() {
   if (path.startsWith('/equipment/')) {
     const id = decodeURIComponent(path.slice('/equipment/'.length));
     openRecordForm(id);
+  } else if (path === '/parts') {
+    addPartChooseEquipment();
   } else {
     openEquipmentForm();
   }
+}
+
+// Adding a part from the global list needs to know which machine it belongs to.
+function addPartChooseEquipment() {
+  const eqs = Store.equipment();
+  if (!eqs.length) { toast('Add equipment first'); return; }
+  if (eqs.length === 1) { openConsumableForm(eqs[0].id); return; }
+  openModal((sheet) => {
+    const card = el('div', { class: 'card' });
+    eqs.forEach(eq => card.appendChild(el('div', { class: 'row', onclick: () => { closeModal(); openConsumableForm(eq.id); } },
+      el('span', { class: 'emoji' }, CATEGORIES[eq.category].emoji),
+      el('div', { class: 'grow' }, el('div', { class: 'primary' }, eq.name)),
+      el('span', { class: 'chev' }, '›'))));
+    sheet.append(
+      el('div', { class: 'sheet-head' }, el('span', { style: 'width:54px' }), el('h3', {}, 'Add part to…'),
+        el('button', { class: 'link plain', onclick: closeModal }, 'Cancel')),
+      card);
+  });
 }
 
 /* ------------------------------ Boot --------------------------------- */

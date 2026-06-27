@@ -1,5 +1,5 @@
 /* ShedLog service worker — offline-first caching of the app shell. */
-const CACHE = 'shedlog-v4';
+const CACHE = 'shedlog-v5';
 const ASSETS = [
   './',
   './index.html',
