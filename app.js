@@ -230,6 +230,8 @@ function router() {
     render = renderEquipmentDetail; showBack = true; showAdd = false;
   } else if (path === '/equipment') {
     render = renderEquipmentList; title = 'Equipment';
+  } else if (path === '/shopping') {
+    render = renderShopping; title = 'Shopping List'; showAdd = false;
   } else if (path === '/history') {
     render = renderHistory; title = 'History'; showAdd = false;
   } else {
@@ -250,6 +252,10 @@ function router() {
       r === '#' + path ||
       (r === '#/equipment' && path.startsWith('/equipment')));
   });
+
+  // shopping tab low-stock indicator dot
+  const dot = $('.tab[data-route="#/shopping"] .dot');
+  if (dot) dot.hidden = lowStockConsumables().length === 0;
 }
 
 /* ------------------------------ Views -------------------------------- */
@@ -631,13 +637,32 @@ function consumableRow(c) {
   if (c.partNumber) bits.push('#' + c.partNumber);
   if (c.qty) bits.push(c.qty);
   if (!bits.length) bits.push(type.label);
+
+  let right;
+  if (stockTracked(c)) {
+    right = isLowStock(c)
+      ? el('span', { class: 'pill over' }, Number(c.onHand) <= 0 ? 'Out' : `Low · ${fmtNum(c.onHand)}`)
+      : el('span', { class: 'pill ok' }, `${fmtNum(c.onHand)} on hand`);
+  } else {
+    right = el('span', { class: 'chev' }, '›');
+  }
+
   return el('div', { class: 'row', onclick: () => openConsumableForm(c.equipmentId, c) },
     el('span', { class: 'emoji' }, type.emoji),
     el('div', { class: 'grow' },
       el('div', { class: 'primary' }, primary),
       el('div', { class: 'secondary' }, bits.join(' · '))),
-    el('span', { class: 'chev' }, '›'));
+    right);
 }
+
+/* Stock-level helpers for consumables. */
+function stockTracked(c) { return c.onHand !== '' && c.onHand != null; }
+function isLowStock(c) {
+  if (!stockTracked(c)) return false;
+  const reorder = (c.reorderAt === '' || c.reorderAt == null) ? 0 : Number(c.reorderAt);
+  return Number(c.onHand) <= reorder;
+}
+function lowStockConsumables() { return Store.data.consumables.filter(isLowStock); }
 
 function renderHistory(view) {
   const all = Store.records()
@@ -677,6 +702,103 @@ function renderHistory(view) {
       el('span', { class: 'chev' }, '›')));
   });
   return { title: 'History' };
+}
+
+/* Equipment ids that currently have a due-soon or overdue schedule. */
+function equipmentWithDueService() {
+  const ids = new Set();
+  Store.tasks().forEach(t => { if (taskStatus(t).status !== 'ok') ids.add(t.equipmentId); });
+  return ids;
+}
+
+function renderShopping(view) {
+  if (!Store.equipment().length) {
+    emptyState(view, '🛒', 'Nothing to shop for yet',
+      'Add equipment and list their consumables with an “On hand” count. When stock runs low — or service comes due — the parts to buy show up here.',
+      null);
+    return { title: 'Shopping List' };
+  }
+
+  const low = lowStockConsumables();
+  const lowIds = new Set(low.map(c => c.id));
+  const dueIds = equipmentWithDueService();
+  const serviceParts = [];
+  dueIds.forEach(eqId => Store.consumablesFor(eqId).forEach(c => { if (!lowIds.has(c.id)) serviceParts.push(c); }));
+
+  if (!low.length && !serviceParts.length) {
+    emptyState(view, '✅', 'Stock looks good',
+      'Nothing is low and no service-due parts to grab. Set “On hand” and “Reorder at” on a part to track it here, or add service schedules so due parts appear.',
+      null);
+    return { title: 'Shopping List' };
+  }
+
+  const total = low.length + serviceParts.length;
+  view.appendChild(el('div', { class: low.length ? 'banner over' : 'banner soon' },
+    el('div', { class: 'bignum' }, String(total)),
+    el('div', {},
+      el('div', { class: 'blabel' }, total === 1 ? '1 item to buy' : `${total} items to buy`),
+      el('div', { class: 'bsub' }, low.length
+        ? `${low.length} low/out` + (serviceParts.length ? ` · ${serviceParts.length} for service` : '')
+        : 'For upcoming service'))));
+
+  view.appendChild(el('div', { style: 'margin:10px 0 2px' },
+    el('button', { class: 'btn secondary small', style: 'width:auto', onclick: () => shareShoppingList(low, serviceParts) }, '⬆️ Share / Copy list')));
+
+  shoppingSection(view, 'Low / Out of Stock', low,
+    c => el('span', { class: 'pill over' }, Number(c.onHand) <= 0 ? 'Out' : `${fmtNum(c.onHand)} left`));
+  shoppingSection(view, 'For Upcoming Service', serviceParts,
+    c => stockTracked(c) ? el('span', { class: 'pill ok' }, `${fmtNum(c.onHand)} on hand`) : el('span', { class: 'chev' }, '›'));
+
+  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:14px;padding:0 16px;line-height:1.4' },
+    'Tap an item to update its on-hand count after you restock.'));
+  return { title: 'Shopping List' };
+}
+
+function shoppingSection(view, heading, items, pillFor) {
+  if (!items.length) return;
+  const sorted = items.slice().sort((a, b) => {
+    const ea = Store.getEquipment(a.equipmentId), eb = Store.getEquipment(b.equipmentId);
+    const na = ea ? ea.name : '', nb = eb ? eb.name : '';
+    if (na !== nb) return na.localeCompare(nb);
+    return CONSUMABLE_ORDER.indexOf(a.type) - CONSUMABLE_ORDER.indexOf(b.type);
+  });
+  view.appendChild(el('div', { class: 'section-title' }, heading));
+  const card = el('div', { class: 'card' });
+  sorted.forEach(c => {
+    const eq = Store.getEquipment(c.equipmentId);
+    const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
+    const sub = [eq ? eq.name : ''];
+    if (c.partNumber) sub.push('#' + c.partNumber);
+    if (c.qty) sub.push(c.qty);
+    card.appendChild(el('div', { class: 'row', onclick: () => openConsumableForm(c.equipmentId, c) },
+      el('span', { class: 'emoji' }, type.emoji),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, c.spec || type.label),
+        el('div', { class: 'secondary' }, sub.filter(Boolean).join(' · '))),
+      pillFor(c)));
+  });
+  view.appendChild(card);
+}
+
+async function shareShoppingList(low, serviceParts) {
+  const line = (c) => {
+    const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
+    const eq = Store.getEquipment(c.equipmentId);
+    const parts = [c.spec || type.label];
+    if (c.partNumber) parts.push('#' + c.partNumber);
+    if (c.qty) parts.push('(' + c.qty + ')');
+    if (eq) parts.push('— ' + eq.name);
+    return '  • ' + parts.join(' ');
+  };
+  let txt = 'Shopping list — ShedLog\n';
+  if (low.length) txt += '\nLow / out of stock:\n' + low.map(line).join('\n') + '\n';
+  if (serviceParts.length) txt += '\nFor upcoming service:\n' + serviceParts.map(line).join('\n') + '\n';
+
+  try {
+    if (navigator.share) { await navigator.share({ title: 'Shopping list', text: txt }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(txt); toast('List copied'); }
+  catch (e) { alert(txt); }
 }
 
 /* ------------------------------ Modals ------------------------------- */
@@ -867,13 +989,15 @@ function openTaskForm(eqId, existing) {
 /* ---- Consumable / part form ---- */
 function openConsumableForm(eqId, existing) {
   const isEdit = !!existing;
-  const c = existing || { id: uid(), equipmentId: eqId, type: 'oil', spec: '', partNumber: '', qty: '', notes: '' };
+  const c = existing || { id: uid(), equipmentId: eqId, type: 'oil', spec: '', partNumber: '', qty: '', onHand: '', reorderAt: '', notes: '' };
   let selectedType = c.type || 'oil';
 
   openModal((sheet) => {
     const specI = el('input', { type: 'text', value: c.spec || '', placeholder: 'e.g. 15W-40 / Donaldson P55' });
     const partI = el('input', { type: 'text', value: c.partNumber || '', placeholder: 'e.g. RE504836' });
     const qtyI = el('input', { type: 'text', value: c.qty || '', placeholder: 'e.g. 8.5 qt, 2 ea, 1/2" x 48"' });
+    const onHandI = el('input', { type: 'number', value: c.onHand ?? '', placeholder: 'e.g. 2', inputmode: 'decimal', step: 'any' });
+    const reorderI = el('input', { type: 'number', value: c.reorderAt ?? '', placeholder: 'e.g. 1', inputmode: 'decimal', step: 'any' });
     const notesI = el('textarea', { placeholder: 'Where it goes, brand preference, source…' }, c.notes || '');
 
     const specField = field('Spec / name', specI, 'The grade, size, or product — what to buy.');
@@ -908,6 +1032,8 @@ function openConsumableForm(eqId, existing) {
         spec: specI.value.trim(),
         partNumber: partI.value.trim(),
         qty: qtyI.value.trim(),
+        onHand: onHandI.value === '' ? '' : Number(onHandI.value),
+        reorderAt: reorderI.value === '' ? '' : Number(reorderI.value),
         notes: notesI.value.trim(),
       });
       closeModal();
@@ -922,6 +1048,10 @@ function openConsumableForm(eqId, existing) {
       el('div', { class: 'field inline2' },
         el('div', {}, el('label', {}, 'Part number'), partI),
         el('div', {}, el('label', {}, 'Qty / capacity'), qtyI)),
+      el('div', { class: 'field inline2' },
+        el('div', {}, el('label', {}, 'On hand'), onHandI),
+        el('div', {}, el('label', {}, 'Reorder at'), reorderI)),
+      el('div', { class: 'hint', style: 'margin:-8px 4px 14px' }, 'Leave “On hand” blank to skip stock tracking. You’ll get a shopping-list alert when on-hand drops to the reorder level (or to 0).'),
       field('Notes', notesI),
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
         if (confirm('Delete this part?')) { Store.deleteConsumable(c.id); closeModal(); toast('Part deleted'); router(); }
@@ -981,8 +1111,36 @@ function openRecordForm(eqId, opts = {}) {
     const unit = UNIT_LABEL[eq.usageUnit];
     const updateUsageChk = el('input', { type: 'checkbox', checked: true, style: 'width:auto;transform:scale(1.3)' });
 
+    // "Parts used" picker — built from this equipment's saved consumables.
+    const consumables = Store.consumablesFor(eqId)
+      .slice().sort((a, b) => CONSUMABLE_ORDER.indexOf(a.type) - CONSUMABLE_ORDER.indexOf(b.type));
+    const partControls = consumables.map(c => {
+      const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
+      const chk = el('input', { type: 'checkbox', style: 'width:auto;transform:scale(1.25)' });
+      const qtyN = el('input', { type: 'number', value: '1', min: '0', step: 'any', inputmode: 'decimal',
+        disabled: true, style: 'width:62px;padding:8px;text-align:center' });
+      const toggle = () => { qtyN.disabled = !chk.checked; };
+      chk.addEventListener('change', toggle);
+      const label = (c.spec || type.label) + (c.partNumber ? ` · #${c.partNumber}` : '');
+      const stock = stockTracked(c) ? `${fmtNum(c.onHand)} on hand` : 'not stocked';
+      const row = el('div', { class: 'row', style: 'cursor:pointer;gap:10px' },
+        chk,
+        el('div', { class: 'grow', onclick: () => { chk.checked = !chk.checked; toggle(); } },
+          el('div', { class: 'primary', style: 'font-size:15px' }, `${type.emoji}  ${label}`),
+          el('div', { class: 'secondary' }, `${type.label} · ${stock}`)),
+        qtyN);
+      return { c, chk, qtyN, row };
+    });
+
     const save = () => {
       if (!titleI.value.trim()) { toast('Enter what was done'); titleI.focus(); return; }
+      const partsUsed = [];
+      partControls.forEach(pc => {
+        if (pc.chk.checked) {
+          const used = pc.qtyN.value === '' ? 1 : Number(pc.qtyN.value);
+          partsUsed.push({ consumableId: pc.c.id, name: pc.c.spec || CONSUMABLE_TYPES[pc.c.type].label, qty: used });
+        }
+      });
       const rec = {
         id: uid(),
         equipmentId: eqId,
@@ -992,7 +1150,16 @@ function openRecordForm(eqId, opts = {}) {
         cost: costI.value === '' ? '' : Number(costI.value),
         notes: notesI.value.trim(),
       };
+      if (partsUsed.length) rec.partsUsed = partsUsed;
       Store.addRecord(rec);
+      // deduct used parts from on-hand stock
+      partsUsed.forEach(pu => {
+        const c = Store.getConsumable(pu.consumableId);
+        if (c && stockTracked(c)) {
+          c.onHand = Math.max(0, Number(c.onHand) - Number(pu.qty || 0));
+          Store.upsertConsumable(c);
+        }
+      });
       // optionally roll the equipment's current usage forward
       if (eq.usageUnit !== 'none' && updateUsageChk.checked && rec.usageAtService !== '' &&
           Number(rec.usageAtService) > Number(eq.currentUsage || 0)) {
@@ -1016,6 +1183,9 @@ function openRecordForm(eqId, opts = {}) {
             updateUsageChk,
             el('label', { style: 'margin:0' }, `Update ${eq.name}'s current ${unit} to this reading`))
         : null,
+      partControls.length ? el('div', { class: 'field' },
+        el('label', {}, 'Parts used (deducts from stock)'),
+        el('div', { class: 'card' }, ...partControls.map(pc => pc.row))) : null,
       field('Cost', costI, 'Optional — parts + labor'),
       field('Notes', notesI),
     );
@@ -1040,6 +1210,11 @@ function openRecordView(r, eq) {
       el('div', { class: 'card' },
         ...rows.map(([k, v]) => el('div', { class: 'row', style: 'cursor:default' },
           el('div', { class: 'grow' }, el('div', { class: 'secondary' }, k), el('div', { class: 'primary' }, v))))),
+      (r.partsUsed && r.partsUsed.length) ? el('div', { class: 'field', style: 'margin-top:14px' },
+        el('label', {}, 'Parts used'),
+        el('div', { class: 'card' }, ...r.partsUsed.map(p => el('div', { class: 'row', style: 'cursor:default' },
+          el('div', { class: 'grow' }, el('div', { class: 'primary' }, p.name)),
+          el('span', { class: 'muted' }, '×' + fmtNum(p.qty)))))) : null,
       r.notes ? el('div', { class: 'field', style: 'margin-top:14px' },
         el('label', {}, 'Notes'),
         el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.4' }, r.notes)) : null,
