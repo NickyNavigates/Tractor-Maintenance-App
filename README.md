@@ -77,6 +77,7 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.
+- **Polished UI** — icon tab bar, equipment photos as avatars, category color accents, swipe a schedule to mark it done or delete, pull-to-refresh, screen transitions, a Settings screen, and a 6-month spend chart on History.
 - **Works offline** — installed as a PWA, it opens and runs with no internet connection.
 
 ---

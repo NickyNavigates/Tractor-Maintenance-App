@@ -3,15 +3,15 @@
 
 'use strict';
 
-const APP_VERSION = 'Build 10';
+const APP_VERSION = 'Build 11';
 
 /* ----------------------------- Constants ----------------------------- */
 
 const CATEGORIES = {
-  tractor:   { label: 'Tractor',   emoji: '🚜', defaultUnit: 'hours' },
-  implement: { label: 'Implement', emoji: '🔧', defaultUnit: 'hours' },
-  tool:      { label: 'Tool',      emoji: '🛠️', defaultUnit: 'none'  },
-  vehicle:   { label: 'Vehicle',   emoji: '🚛', defaultUnit: 'miles' },
+  tractor:   { label: 'Tractor',   emoji: '🚜', defaultUnit: 'hours', color: '#367c2b' },
+  implement: { label: 'Implement', emoji: '🔧', defaultUnit: 'hours', color: '#b25e00' },
+  tool:      { label: 'Tool',      emoji: '🛠️', defaultUnit: 'none',  color: '#6a1b9a' },
+  vehicle:   { label: 'Vehicle',   emoji: '🚛', defaultUnit: 'miles', color: '#1565c0' },
 };
 const CATEGORY_ORDER = ['tractor', 'implement', 'vehicle', 'tool'];
 
@@ -295,6 +295,49 @@ function toast(msg) {
   toast._t = setTimeout(() => { t.hidden = true; }, 1800);
 }
 
+/* Swipe-to-reveal row actions (touch). content = the .row; actions = [{label, cls, onClick}]. */
+function closeAllSwipes(except) {
+  document.querySelectorAll('.swipe.open').forEach(w => { if (w !== except && w._close) w._close(); });
+}
+function swipeRow(content, actions) {
+  const wrap = el('div', { class: 'swipe' });
+  const act = el('div', { class: 'swipe-actions' });
+  actions.forEach(a => act.appendChild(el('button', { class: a.cls,
+    onclick: (e) => { e.stopPropagation(); wrap._close(); a.onClick(); } }, a.label)));
+  const fg = el('div', { class: 'swipe-fg' }, content);
+  wrap.append(act, fg);
+
+  let startX = 0, startY = 0, dx = 0, base = 0, dragging = false, moved = false;
+  const width = () => act.offsetWidth || actions.length * 84;
+  const openRow = () => { closeAllSwipes(wrap); wrap.classList.add('open'); fg.style.transform = `translateX(${-width()}px)`; };
+  wrap._close = () => { wrap.classList.remove('open'); fg.style.transform = ''; };
+
+  fg.addEventListener('touchstart', (e) => {
+    const t = e.touches[0]; startX = t.clientX; startY = t.clientY; dragging = true; moved = false;
+    fg.style.transition = 'none';
+    base = wrap.classList.contains('open') ? -width() : 0;
+  }, { passive: true });
+  fg.addEventListener('touchmove', (e) => {
+    if (!dragging) return;
+    const t = e.touches[0]; dx = t.clientX - startX;
+    if (!moved && Math.abs(dx) > Math.abs(t.clientY - startY) && Math.abs(dx) > 6) moved = true;
+    if (!moved) return;
+    const x = Math.min(0, Math.max(-width() - 24, base + dx));
+    fg.style.transform = `translateX(${x}px)`;
+  }, { passive: true });
+  fg.addEventListener('touchend', () => {
+    if (!dragging) return; dragging = false;
+    fg.style.transition = '';
+    if (base + dx < -width() / 2) openRow(); else wrap._close();
+    dx = 0;
+  });
+  // While open (or right after a drag), a tap closes the row instead of activating it.
+  content.addEventListener('click', (e) => {
+    if (wrap.classList.contains('open') || moved) { e.stopPropagation(); e.preventDefault(); wrap._close(); moved = false; }
+  }, true);
+  return wrap;
+}
+
 /* --------------------------- Task scheduling -------------------------- */
 
 // Returns { status: 'ok'|'soon'|'over', text: string, sort: number }
@@ -500,6 +543,8 @@ function router() {
     render = renderShopping; title = 'Shopping List'; showAdd = false;
   } else if (path === '/history') {
     render = renderHistory; title = 'History'; showAdd = false;
+  } else if (path === '/settings') {
+    render = renderSettings; title = 'Settings'; showBack = true; showAdd = false;
   } else {
     render = renderDashboard; title = 'Dashboard';
   }
@@ -510,6 +555,8 @@ function router() {
   view.innerHTML = '';
   const result = render(view, arg);
   $('#title').textContent = result?.title || title;
+  // subtle fade-in transition
+  view.classList.remove('view-fade'); void view.offsetWidth; view.classList.add('view-fade');
 
   // active tab
   document.querySelectorAll('.tab').forEach(tab => {
@@ -612,6 +659,20 @@ function renderDashboard(view) {
   eqs.forEach(eq => eqCard.appendChild(equipmentRow(eq)));
   view.appendChild(eqCard);
 
+  // Settings entry
+  view.appendChild(el('div', { class: 'spacer' }));
+  view.appendChild(el('div', { class: 'card' },
+    el('div', { class: 'row', onclick: () => navigate('#/settings') },
+      el('span', { class: 'emoji' }, '⚙️'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'Settings'),
+        el('div', { class: 'secondary' }, 'Reminders, backup & restore, about')),
+      el('span', { class: 'chev' }, '›'))));
+
+  return { title: 'Dashboard' };
+}
+
+function renderSettings(view) {
   // Reminders
   view.appendChild(el('div', { class: 'section-title' }, 'Reminders'));
   const notifChk = el('input', { type: 'checkbox', checked: !!Meta.data.notify });
@@ -626,8 +687,8 @@ function renderDashboard(view) {
         el('div', { class: 'primary' }, 'Maintenance reminders'),
         el('div', { class: 'secondary' }, 'Badge the app icon + notify when service is due')),
       notifChk)));
-  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:8px;padding:0 16px;line-height:1.4' },
-    'Reminders update when you open the app — it badges the icon with overdue items and notifies you once a day. (Background alerts aren’t possible without an internet account.)'));
+  view.appendChild(el('div', { class: 'muted', style: 'margin:8px 4px 0;line-height:1.4' },
+    'Reminders update when you open the app — it badges the icon with items needing attention and notifies you once a day. (Background alerts aren’t possible without an internet account.)'));
 
   // Data & backup
   view.appendChild(el('div', { class: 'section-title' }, 'Data & Backup'));
@@ -644,12 +705,19 @@ function renderDashboard(view) {
         el('div', { class: 'primary' }, 'Restore from Backup'),
         el('div', { class: 'secondary' }, 'Replace data from a backup file')),
       el('span', { class: 'chev' }, '›'))));
-  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:12px;padding:0 16px;line-height:1.4' },
+  view.appendChild(el('div', { class: 'muted', style: 'margin:8px 4px 0;line-height:1.4' },
     'Your data is stored only on this device. Export regularly to keep a copy in your Files app or iCloud Drive.'));
-  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:16px;font-size:11px;opacity:0.7' },
-    `Tractor Shed · ${APP_VERSION}`));
 
-  return { title: 'Dashboard' };
+  // About
+  view.appendChild(el('div', { class: 'section-title' }, 'About'));
+  view.appendChild(el('div', { class: 'card' },
+    el('div', { class: 'row', style: 'cursor:default' },
+      el('span', { class: 'emoji' }, '🚜'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'Tractor Shed'),
+        el('div', { class: 'secondary' }, APP_VERSION + ' · works offline, data stays on your device')))));
+
+  return { title: 'Settings' };
 }
 
 /* ---------------------------- Backup / restore ----------------------- */
@@ -789,12 +857,16 @@ function importData() {
 
 function taskRow(x, showEquip) {
   const { task, st, eq } = x;
-  return el('div', { class: 'row', onclick: () => openTaskActions(task) },
+  const row = el('div', { class: 'row', onclick: () => openTaskActions(task) },
     el('span', { class: 'emoji' }, CATEGORIES[eq.category].emoji),
     el('div', { class: 'grow' },
       el('div', { class: 'primary' }, task.title),
       el('div', { class: 'secondary' }, showEquip ? `${eq.name} · due ${st.due}` : `Due ${st.due}`)),
     statusPill(st));
+  return swipeRow(row, [
+    { label: 'Done', cls: 'done', onClick: () => markTaskDone(task) },
+    { label: 'Delete', cls: 'del', onClick: () => askConfirm('Delete this schedule?', () => { Store.deleteTask(task.id); toast('Schedule deleted'); router(); }, { title: 'Delete schedule', confirmLabel: 'Delete' }) },
+  ]);
 }
 
 function equipmentRow(eq) {
@@ -809,7 +881,7 @@ function equipmentRow(eq) {
     : soon ? el('span', { class: 'pill soon' }, `${soon} soon`)
     : el('span', { class: 'chev' }, '›');
 
-  return el('div', { class: 'row', onclick: () => navigate('#/equipment/' + encodeURIComponent(eq.id)) },
+  return el('div', { class: 'row', style: `box-shadow: inset 4px 0 0 ${CATEGORIES[eq.category].color}`, onclick: () => navigate('#/equipment/' + encodeURIComponent(eq.id)) },
     equipmentAvatar(eq),
     el('div', { class: 'grow' },
       el('div', { class: 'primary' }, eq.name),
@@ -1021,11 +1093,15 @@ function renderEquipmentDetail(view, id) {
     view.appendChild(el('div', { class: 'section-title' }, 'Service Schedules'));
     const card = el('div', { class: 'card' });
     tasks.forEach(({ task, st }) => {
-      card.appendChild(el('div', { class: 'row', onclick: () => openTaskActions(task) },
+      const row = el('div', { class: 'row', onclick: () => openTaskActions(task) },
         el('div', { class: 'grow' },
           el('div', { class: 'primary' }, task.title),
           el('div', { class: 'secondary' }, intervalText(task) + ' · next ' + st.due)),
-        statusPill(st)));
+        statusPill(st));
+      card.appendChild(swipeRow(row, [
+        { label: 'Done', cls: 'done', onClick: () => markTaskDone(task) },
+        { label: 'Delete', cls: 'del', onClick: () => askConfirm('Delete this schedule?', () => { Store.deleteTask(task.id); toast('Schedule deleted'); router(); }, { title: 'Delete schedule', confirmLabel: 'Delete' }) },
+      ]));
     });
     view.appendChild(card);
   }
@@ -1139,6 +1215,36 @@ function isLowStock(c) {
 }
 function lowStockConsumables() { return Store.data.consumables.filter(isLowStock); }
 
+function fmtMoneyShort(n) {
+  n = Number(n);
+  if (n >= 1000) return '$' + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return '$' + Math.round(n);
+}
+
+// Simple CSS bar chart of spend over the last 6 months. Returns null if no spend.
+function spendChart(all) {
+  const now = new Date(todayISO() + 'T00:00:00');
+  const months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    months.push({ key, label: d.toLocaleDateString(undefined, { month: 'short' }), total: 0 });
+  }
+  const idx = {}; months.forEach((m, i) => { idx[m.key] = i; });
+  all.forEach(({ r }) => { const k = (r.date || '').slice(0, 7); if (k in idx) months[idx[k]].total += Number(r.cost) || 0; });
+  const max = Math.max(...months.map(m => m.total));
+  if (max <= 0) return null;
+  const chart = el('div', { class: 'chart' });
+  months.forEach(m => {
+    const h = Math.max(Math.round((m.total / max) * 100), m.total > 0 ? 6 : 0);
+    chart.appendChild(el('div', { class: 'chart-col' },
+      el('div', { class: 'chart-amt' }, m.total > 0 ? fmtMoneyShort(m.total) : ''),
+      el('div', { class: 'chart-bar-wrap' }, el('div', { class: 'chart-bar', style: `height:${h}%` })),
+      el('div', { class: 'chart-lbl' }, m.label)));
+  });
+  return el('div', { class: 'card chart-card' }, chart);
+}
+
 function renderHistory(view) {
   const all = Store.records()
     .map(r => ({ r, eq: Store.getEquipment(r.equipmentId) }))
@@ -1157,6 +1263,10 @@ function renderHistory(view) {
     el('div', {},
       el('div', { class: 'blabel' }, 'Service records'),
       el('div', { class: 'bsub' }, totalCost > 0 ? `${fmtMoney(totalCost)} total spent` : 'across all equipment'))));
+
+  // Monthly spend chart (last 6 months)
+  const chart = spendChart(all);
+  if (chart) { view.appendChild(el('div', { class: 'section-title' }, 'Spend — last 6 months')); view.appendChild(chart); }
 
   // group by month
   let lastMonth = '';
@@ -2165,6 +2275,37 @@ function handleAdd() {
   }
 }
 
+// Pull down at the top of a list to refresh (re-render).
+function setupPullToRefresh() {
+  const view = $('#view');
+  const ind = el('div', { class: 'ptr', hidden: true }, '↻');
+  document.body.appendChild(ind);
+  let startY = 0, pulling = false, dist = 0;
+  view.addEventListener('touchstart', (e) => {
+    if (view.scrollTop <= 0) { startY = e.touches[0].clientY; pulling = true; dist = 0; }
+  }, { passive: true });
+  view.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+    dist = e.touches[0].clientY - startY;
+    if (dist > 0) {
+      ind.hidden = false;
+      const d = Math.min(dist, 80);
+      ind.style.transform = `translateX(-50%) translateY(${d}px) rotate(${d * 4}deg)`;
+      ind.style.opacity = Math.min(d / 60, 1);
+    }
+  }, { passive: true });
+  view.addEventListener('touchend', () => {
+    if (!pulling) return; pulling = false;
+    if (dist > 60) {
+      ind.classList.add('spin');
+      router();
+      setTimeout(() => { ind.hidden = true; ind.classList.remove('spin'); ind.style.opacity = 0; }, 400);
+    } else {
+      ind.hidden = true; ind.style.opacity = 0; ind.style.transform = 'translateX(-50%)';
+    }
+  });
+}
+
 // Handle home-screen quick-action shortcuts (manifest "shortcuts").
 function handleShortcut() {
   let action = '';
@@ -2227,6 +2368,7 @@ function init() {
   window.addEventListener('hashchange', router);
   if (!location.hash) location.hash = '#/dashboard';
   router();
+  setupPullToRefresh();
 
   // Home-screen shortcuts (?action=…)
   handleShortcut();

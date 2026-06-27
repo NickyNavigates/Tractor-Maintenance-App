@@ -106,6 +106,15 @@ body {
   border-bottom: 0.5px solid var(--line); cursor: pointer; min-height: 56px;
 }
 .row:last-child { border-bottom: none; }
+
+/* Swipe-to-reveal actions */
+.swipe { position: relative; overflow: hidden; }
+.swipe:last-child .row { border-bottom: none; }
+.swipe-actions { position: absolute; inset: 0 0 0 auto; display: flex; }
+.swipe-actions button { border: none; color: #fff; font-weight: 700; font-size: 14px; padding: 0 20px; cursor: pointer; }
+.swipe-actions .done { background: var(--green); }
+.swipe-actions .del { background: var(--red); }
+.swipe-fg { position: relative; background: var(--card); transition: transform 0.2s ease; will-change: transform; }
 .row:active { background: color-mix(in srgb, var(--text) 5%, transparent); }
 .row .emoji { font-size: 26px; width: 32px; text-align: center; flex: none; }
 .row .grow { flex: 1; min-width: 0; }
@@ -139,6 +148,16 @@ body {
   padding: 12px 6px; font-size: 13px; font-weight: 600; color: var(--green); cursor: pointer; }
 .qa:active { background: var(--green-tint); }
 .qa-i { font-size: 22px; }
+
+/* Spend chart */
+.chart-card { padding: 14px 12px 8px; }
+.chart { display: flex; align-items: flex-end; gap: 8px; height: 130px; }
+.chart-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; }
+.chart-amt { font-size: 10px; color: var(--text-2); margin-bottom: 4px; height: 14px; }
+.chart-bar-wrap { flex: 1; width: 100%; display: flex; align-items: flex-end; }
+.chart-bar { width: 100%; background: linear-gradient(var(--green), var(--green-dark));
+  border-radius: 6px 6px 0 0; min-height: 2px; transition: height 0.4s ease; }
+.chart-lbl { font-size: 11px; color: var(--text-2); margin-top: 6px; }
 
 /* Empty state */
 .empty { text-align: center; padding: 60px 24px; color: var(--text-2); }
@@ -268,6 +287,15 @@ input[type="checkbox"] { -webkit-appearance: checkbox; appearance: checkbox;
   .report-toolbar { display: none !important; }
   .report-body { max-width: none; }
 }
+
+/* View transition + pull-to-refresh */
+.view-fade { animation: viewfade 0.22s ease; }
+@keyframes viewfade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.ptr { position: fixed; top: calc(var(--safe-top) + 60px); left: 50%; transform: translateX(-50%);
+  z-index: 50; font-size: 24px; color: var(--green); opacity: 0; pointer-events: none; }
+.ptr[hidden] { display: none; }
+.ptr.spin { animation: ptrspin 0.6s linear infinite; opacity: 1 !important; }
+@keyframes ptrspin { from { transform: translateX(-50%) rotate(0); } to { transform: translateX(-50%) rotate(360deg); } }
 
 .spacer { height: 8px; }
 .stack > * + * { margin-top: 10px; }
