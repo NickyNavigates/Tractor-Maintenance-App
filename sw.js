@@ -1,5 +1,7 @@
-/* ShedLog service worker — offline-first caching of the app shell. */
-const CACHE = 'shedlog-v8';
+/* Tractor Shed service worker.
+   App shell = network-first (updates show up promptly when online),
+   static assets (icons, scanner bundle) = cache-first. Offline still works. */
+const CACHE = 'shedlog-v9';
 const ASSETS = [
   './',
   './index.html',
@@ -22,15 +24,35 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// Cache-first for app shell; network fallback. App is fully client-side so this works offline.
+// Same-origin app shell: HTML/JS/CSS/manifest and navigations.
+function isShell(url) {
+  if (url.origin !== location.origin) return false;
+  return url.pathname.endsWith('/') || /\.(html|js|css|webmanifest)$/.test(url.pathname);
+}
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+
+  if (req.mode === 'navigate' || isShell(url)) {
+    // Network-first: fetch fresh, fall back to cache when offline.
+    e.respondWith(
+      fetch(req).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
+        return res;
+      }).catch(() => caches.match(req).then(r => r || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // Static assets: cache-first (fast), populate on first use.
   e.respondWith(
     caches.match(req).then(cached => cached || fetch(req).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
       return res;
-    }).catch(() => caches.match('./index.html')))
+    }).catch(() => cached))
   );
 });

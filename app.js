@@ -3,6 +3,8 @@
 
 'use strict';
 
+const APP_VERSION = 'Build 9';
+
 /* ----------------------------- Constants ----------------------------- */
 
 const CATEGORIES = {
@@ -644,6 +646,8 @@ function renderDashboard(view) {
       el('span', { class: 'chev' }, '›'))));
   view.appendChild(el('div', { class: 'center muted', style: 'margin-top:12px;padding:0 16px;line-height:1.4' },
     'Your data is stored only on this device. Export regularly to keep a copy in your Files app or iCloud Drive.'));
+  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:16px;font-size:11px;opacity:0.7' },
+    `Tractor Shed · ${APP_VERSION}`));
 
   return { title: 'Dashboard' };
 }
@@ -2186,8 +2190,22 @@ function init() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { updateBadge(); maybeNotify(); } });
 
   if ('serviceWorker' in navigator) {
+    const hadController = !!navigator.serviceWorker.controller;
+    // When a new version takes control, reload once to show it (skip the very first install).
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || window.__reloading) return;
+      window.__reloading = true;
+      location.reload();
+    });
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch(() => {});
+      navigator.serviceWorker.register('sw.js').then(reg => {
+        reg.update();
+        setInterval(() => reg.update(), 60 * 60 * 1000); // hourly update check
+      }).catch(() => {});
+    });
+    // Check for a new version each time the app returns to the foreground.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) navigator.serviceWorker.getRegistration().then(r => r && r.update()).catch(() => {});
     });
   }
 }
