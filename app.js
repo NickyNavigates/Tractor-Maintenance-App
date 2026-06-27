@@ -135,6 +135,7 @@ const Store = {
   manualsFor(eqId) { return this.data.manuals.filter(m => m.equipmentId === eqId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')); },
   getManual(id) { return this.data.manuals.find(m => m.id === id); },
   addManual(m) { this.data.manuals.push(m); this.save(); },
+  updateManual(m) { const i = this.data.manuals.findIndex(x => x.id === m.id); if (i >= 0) this.data.manuals[i] = m; this.save(); },
   deleteManual(id) { this.data.manuals = this.data.manuals.filter(m => m.id !== id); BlobDB.del('file', id).catch(() => {}); this.save(); },
 };
 
@@ -717,11 +718,13 @@ function renderEquipmentDetail(view, id) {
   view.appendChild(actions);
 
   // Photos & locations (e.g. zerk fittings)
-  view.appendChild(el('div', { class: 'section-title' }, 'Photos & Locations'));
+  const photoCount = Store.photosFor('equipment', eq.id).length;
+  view.appendChild(el('div', { class: 'section-title' }, photoCount ? `Photos & Locations · ${photoCount}` : 'Photos & Locations'));
   view.appendChild(photoManager('equipment', eq.id, eq.id, () => router()));
 
   // Manuals & documents
-  view.appendChild(el('div', { class: 'section-title' }, 'Manuals & Documents'));
+  const manualCount = Store.manualsFor(eq.id).length;
+  view.appendChild(el('div', { class: 'section-title' }, manualCount ? `Manuals & Documents · ${manualCount}` : 'Manuals & Documents'));
   view.appendChild(manualManager(eq.id));
 
   // Schedules
@@ -822,12 +825,22 @@ function consumableRow(c) {
     right = el('span', { class: 'chev' }, '›');
   }
 
+  const photos = Store.photosFor('consumable', c.id);
+  const lead = photos.length ? miniThumb(photos[0].id) : el('span', { class: 'emoji' }, type.emoji);
+
   return el('div', { class: 'row', onclick: () => openConsumableForm(c.equipmentId, c) },
-    el('span', { class: 'emoji' }, type.emoji),
+    lead,
     el('div', { class: 'grow' },
       el('div', { class: 'primary' }, primary),
       el('div', { class: 'secondary' }, bits.join(' · '))),
     right);
+}
+
+// Small rounded thumbnail (loads from IndexedDB) for list rows.
+function miniThumb(photoId) {
+  const img = el('img', { class: 'mini-thumb', alt: '' });
+  BlobDB.get('img', photoId).then(d => { if (d) img.src = d; }).catch(() => {});
+  return img;
 }
 
 /* Stock-level helpers for consumables. */
@@ -1100,19 +1113,38 @@ function manualManager(eqId) {
     const card = el('div', { class: 'card' });
     manuals.forEach(m => {
       const isPdf = (m.mime || '').includes('pdf') || /\.pdf$/i.test(m.name || '');
-      card.appendChild(el('div', { class: 'row', onclick: () => openManual(m) },
+      card.appendChild(el('div', { class: 'row', onclick: () => openManualActions(m) },
         el('span', { class: 'emoji' }, isPdf ? '📄' : '🖼️'),
         el('div', { class: 'grow' },
           el('div', { class: 'primary' }, m.name || 'Document'),
-          el('div', { class: 'secondary' }, (m.size ? fmtBytes(m.size) + ' · ' : '') + 'tap to open')),
-        el('button', { class: 'btn small secondary', style: 'padding:7px 10px;margin-left:8px',
-          onclick: (e) => { e.stopPropagation(); if (confirm('Delete this document?')) { Store.deleteManual(m.id); toast('Document deleted'); router(); } } }, 'Delete')));
+          el('div', { class: 'secondary' }, (m.size ? fmtBytes(m.size) + ' · ' : '') + 'tap to open or rename')),
+        el('span', { class: 'chev' }, '›')));
     });
     wrap.appendChild(card);
   }
   wrap.appendChild(el('button', { class: 'btn small secondary', style: 'width:auto;margin-top:10px',
     onclick: () => addManualFlow(eqId, () => router()) }, '＋ Add Manual / Document'));
   return wrap;
+}
+
+// Open / rename / delete a stored document.
+function openManualActions(m) {
+  openModal((sheet) => {
+    const nameI = el('input', { type: 'text', value: m.name || '', placeholder: 'Document name' });
+    const save = () => {
+      const v = nameI.value.trim();
+      if (v && v !== m.name) { m.name = v; Store.updateManual(m); toast('Renamed'); }
+      closeModal(); router();
+    };
+    sheet.append(
+      sheetHead('Document', save),
+      field('Name', nameI, (m.size ? fmtBytes(m.size) + ' · ' : '') + (m.mime || '')),
+      el('div', { class: 'stack' },
+        el('button', { class: 'btn', onclick: () => openManual(m) }, 'Open Document'),
+        el('button', { class: 'btn danger', onclick: () => {
+          if (confirm('Delete this document?')) { Store.deleteManual(m.id); closeModal(); toast('Document deleted'); router(); }
+        } }, 'Delete Document')));
+  });
 }
 
 function addManualFlow(eqId, onDone) {

@@ -65,8 +65,8 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Log against a schedule** — when logging maintenance, pick one of the machine's schedules to prefill the work, auto-select its parts, and reset its countdown in one step.
 - **Part costs** — give a part a unit cost to see estimated shopping totals.
 - **Instructions per task** — write step-by-step how-to notes (torque specs, fill amounts, tips) on any service schedule; they show when you view the schedule and when you log it.
-- **Photos & locations** — snap reference photos for **equipment, individual schedules, or individual parts** (e.g. where each zerk fitting is) with a location note. Saved on-device in IndexedDB and included in backups.
-- **Manuals & documents** — store operator/parts manuals (PDF or image) per machine; tap to open. Included in backups.
+- **Photos & locations** — snap reference photos for **equipment, individual schedules, or individual parts** (e.g. where each zerk fitting is) with a location note. A part's photo appears as a thumbnail in the parts lists. Saved on-device in IndexedDB and included in backups.
+- **Manuals & documents** — store operator/parts manuals (PDF or image) per machine; tap to open, rename, or delete. Included in backups. The equipment page shows photo and document counts.
 - **All Parts list** — one editable list of every part across all your equipment, reachable from the Equipment tab.
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
