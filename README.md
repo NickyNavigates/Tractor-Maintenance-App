@@ -69,7 +69,11 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Manuals & documents** — store operator/parts manuals (PDF or image) per machine; tap to open, rename, or delete. Included in backups. The equipment page shows photo and document counts.
 - **All Parts list** — one editable list of every part across all your equipment, reachable from the Equipment tab.
 - **Search** — the Equipment tab has a search box that finds matches across equipment, parts (incl. part numbers), schedules, documents, and photo captions, grouped and tappable.
-- **Reminders** — opt-in maintenance reminders badge the home-screen icon with the number of overdue items and send a once-a-day notification when you open the app. (Background push needs an internet account/server, so reminders refresh on open.)
+- **Reminders** — opt-in maintenance reminders badge the home-screen icon with items needing attention and send a once-a-day notification when you open the app. Each schedule can set a **lead time** ("remind me 1 week / 20 hours before due"). (Background push needs an internet account/server, so reminders refresh on open.)
+- **Service templates** — apply a starter set of schedules for a machine's category (tractor/implement/vehicle/tool) in one tap, then tweak.
+- **Barcode / QR scanning** — scan a VIN/serial when adding equipment, a part barcode when adding a part, or use the dashboard **Scan** button to jump straight to a machine or part. (Uses the device camera via a bundled scanner.)
+- **Printable service report** — a clean per-machine report (details, schedules, parts, full history + total spend, and a QR that reopens the machine). Use the print dialog to **Save to PDF** or AirPrint.
+- **Quick actions & home-screen shortcuts** — Log / Add / Scan buttons and a fleet stat strip on the dashboard; long-pressing the app icon offers quick "Log Maintenance" / "Add Equipment" shortcuts (where supported).
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.
@@ -94,6 +98,7 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 | `manifest.webmanifest` | PWA metadata (name, icons, colors) |
 | `sw.js` | Service worker for offline caching |
 | `icons/` | App icons |
+| `vendor/zxing.min.js` | Bundled barcode/QR scanner + encoder (lazy-loaded) |
 | `.github/workflows/deploy-pages.yml` | Auto-deploy to GitHub Pages |
 
 ---

@@ -31,6 +31,36 @@ const CONSUMABLE_TYPES = {
 };
 const CONSUMABLE_ORDER = ['oil', 'hydoil', 'fluid', 'grease', 'filter', 'belt', 'tire', 'battery', 'spark', 'blade', 'other'];
 
+// Starter service schedules by category. 'u' = usage interval, 'd' = days interval.
+const SCHEDULE_TEMPLATES = {
+  tractor: [
+    { title: 'Engine oil & filter', u: 200 },
+    { title: 'Grease all fittings', d: 14 },
+    { title: 'Air filter', u: 400 },
+    { title: 'Hydraulic / transmission fluid', u: 600 },
+    { title: 'Coolant check', d: 180 },
+    { title: 'Fuel filter', u: 400 },
+  ],
+  implement: [
+    { title: 'Grease all fittings', d: 14 },
+    { title: 'Gearbox oil', u: 100 },
+    { title: 'Blade / tine inspection', d: 90 },
+    { title: 'Driveline & guards check', d: 90 },
+  ],
+  vehicle: [
+    { title: 'Engine oil & filter', u: 5000 },
+    { title: 'Tire rotation', u: 7500 },
+    { title: 'Air filter', u: 15000 },
+    { title: 'Brake inspection', d: 365 },
+    { title: 'Coolant / antifreeze', d: 365 },
+  ],
+  tool: [
+    { title: 'General service / tune-up', d: 180 },
+    { title: 'Sharpen blade / chain', d: 90 },
+    { title: 'Air filter / spark plug', d: 180 },
+  ],
+};
+
 const SOON_DAYS = 14;   // time-based task is "due soon" within this many days
 const SOON_USAGE_FRACTION = 0.1; // usage-based task is "due soon" within 10% of interval
 const BACKUP_REMINDER_DAYS = 14; // nudge to back up if last backup is older than this
@@ -275,7 +305,9 @@ function taskStatus(task) {
     const dueAt = base + Number(task.intervalValue);
     const current = Number(eq?.currentUsage ?? 0);
     const left = dueAt - current;
-    const soonWindow = Number(task.intervalValue) * SOON_USAGE_FRACTION;
+    // "soon" window = the task's lead amount if set, else a fraction of the interval
+    const soonWindow = (task.leadUsage !== '' && task.leadUsage != null)
+      ? Number(task.leadUsage) : Number(task.intervalValue) * SOON_USAGE_FRACTION;
     let status = 'ok';
     if (left <= 0) status = 'over';
     else if (left <= soonWindow) status = 'soon';
@@ -286,9 +318,10 @@ function taskStatus(task) {
   } else {
     const last = task.lastDoneDate || todayISO();
     const nextDays = daysBetween(todayISO(), addDays(last, Number(task.intervalValue)));
+    const soonDays = (task.leadDays !== '' && task.leadDays != null) ? Number(task.leadDays) : SOON_DAYS;
     let status = 'ok';
     if (nextDays < 0) status = 'over';
-    else if (nextDays <= SOON_DAYS) status = 'soon';
+    else if (nextDays <= soonDays) status = 'soon';
     const text = nextDays < 0
       ? `Overdue ${Math.abs(nextDays)}d`
       : nextDays === 0 ? 'Due today' : `In ${nextDays} days`;
@@ -312,11 +345,13 @@ function allTasksRanked() {
 /* ----------------------------- Reminders ----------------------------- */
 
 function overdueCount() { return Store.tasks().filter(t => taskStatus(t).status === 'over').length; }
+// Items needing attention = overdue + due-soon (honors each task's lead time).
+function attentionCount() { return Store.tasks().filter(t => taskStatus(t).status !== 'ok').length; }
 
-// Put a count of overdue items on the installed app's home-screen icon.
+// Put a count of items needing attention on the installed app's home-screen icon.
 function updateBadge() {
   try {
-    const n = overdueCount();
+    const n = attentionCount();
     if ('setAppBadge' in navigator) {
       if (n > 0) navigator.setAppBadge(n); else navigator.clearAppBadge();
     }
@@ -337,16 +372,95 @@ async function setNotifications(on) {
 // When the app opens (or returns to foreground), nudge about overdue work — once per day.
 async function maybeNotify() {
   if (!Meta.data.notify || !('Notification' in window) || Notification.permission !== 'granted') return;
-  const n = overdueCount();
-  if (!n) return;
+  const over = overdueCount();
+  const total = attentionCount();
+  if (!total) return;
   if (Meta.data.lastNotifyDate === todayISO()) return;
   Meta.data.lastNotifyDate = todayISO(); Meta.save();
-  const body = n === 1 ? '1 maintenance task is overdue.' : `${n} maintenance tasks are overdue.`;
+  const body = over > 0
+    ? `${over} task${over > 1 ? 's' : ''} overdue${total > over ? `, ${total - over} due soon` : ''}.`
+    : `${total} maintenance task${total > 1 ? 's' : ''} due soon.`;
   try {
     const reg = navigator.serviceWorker && await navigator.serviceWorker.ready;
     if (reg && reg.showNotification) await reg.showNotification('Tractor Shed', { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: 'shedlog-due' });
     else new Notification('Tractor Shed', { body });
   } catch (e) { /* ignore */ }
+}
+
+/* ------------------------------ Scanner ------------------------------ */
+// Multi-format barcode/QR scanning via a lazily-loaded ZXing bundle.
+
+let _zxingLoading = null;
+function ensureScanner() {
+  if (window.ZXing) return Promise.resolve();
+  if (_zxingLoading) return _zxingLoading;
+  _zxingLoading = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/zxing.min.js';
+    s.onload = () => res();
+    s.onerror = () => { _zxingLoading = null; rej(new Error('load failed')); };
+    document.head.appendChild(s);
+  });
+  return _zxingLoading;
+}
+
+let _scanStop = null;
+function openScanner(onResult) {
+  openModal((sheet) => {
+    const video = el('video', { class: 'scan-video', autoplay: '', muted: '' });
+    video.setAttribute('playsinline', ''); // iOS: keep camera inline, not fullscreen
+    video.muted = true;
+    const status = el('div', { class: 'center muted', style: 'margin-top:10px' }, 'Starting camera…');
+    let reader = null, stopped = false;
+    _scanStop = () => { stopped = true; try { reader && reader.reset(); } catch (e) {} _scanStop = null; };
+
+    sheet.append(
+      el('div', { class: 'sheet-head' },
+        el('span', { style: 'width:54px' }),
+        el('h3', {}, 'Scan Code'),
+        el('button', { class: 'link plain', onclick: closeModal }, 'Cancel')),
+      el('div', { class: 'scan-wrap' }, video, el('div', { class: 'scan-frame' })),
+      status,
+      el('div', { class: 'hint center', style: 'margin-top:8px' }, 'Point at a barcode or QR code and hold steady. Good light helps.'),
+    );
+
+    ensureScanner().then(() => {
+      if (stopped) return;
+      reader = new ZXing.BrowserMultiFormatReader();
+      status.textContent = 'Point the camera at a code…';
+      reader.decodeFromConstraints({ video: { facingMode: { ideal: 'environment' } } }, video, (result) => {
+        if (stopped || !result) return;
+        const text = result.getText ? result.getText() : (result.text || '');
+        if (!text) return;
+        _scanStop && _scanStop();
+        closeModal();
+        onResult(text);
+      }).catch(() => { status.textContent = 'Could not access the camera. Check permissions.'; });
+    }).catch(() => { status.textContent = 'Scanner unavailable on this device.'; });
+  });
+}
+
+// Scan-to-find: jump to a machine or part from a scanned QR/barcode.
+function scanLookup(code) {
+  const m = code.match(/#\/equipment\/([^?&]+)/);
+  if (m) { const id = decodeURIComponent(m[1]); if (Store.getEquipment(id)) { navigate('#/equipment/' + encodeURIComponent(id)); return; } }
+  const lc = code.trim().toLowerCase();
+  const eq = Store.equipment().find(e => (e.identifier || '').toLowerCase() === lc);
+  if (eq) { navigate('#/equipment/' + encodeURIComponent(eq.id)); return; }
+  const part = Store.data.consumables.find(c => (c.partNumber || '').toLowerCase() === lc);
+  if (part) {
+    navigate('#/equipment/' + encodeURIComponent(part.equipmentId));
+    setTimeout(() => openConsumableForm(part.equipmentId, Store.getConsumable(part.id)), 60);
+    return;
+  }
+  toast('No match for “' + code + '”');
+}
+
+// A text input paired with a Scan button that fills it.
+function withScanButton(input, onScan) {
+  const btn = el('button', { class: 'btn small secondary', type: 'button', style: 'width:auto;flex:none',
+    onclick: () => openScanner(code => { input.value = code; toast('Scanned'); if (onScan) onScan(code); }) }, '⧉ Scan');
+  return el('div', { style: 'display:flex;gap:8px;align-items:stretch' }, input, btn);
 }
 
 /* ------------------------------ Routing ------------------------------ */
@@ -463,6 +577,20 @@ function renderDashboard(view) {
         el('div', { class: 'blabel' }, 'All caught up'),
         el('div', { class: 'bsub' }, ranked.length ? 'No maintenance due right now' : 'Add service schedules to get reminders'))));
   }
+
+  // Quick actions
+  view.appendChild(el('div', { class: 'quick-actions' },
+    el('button', { class: 'qa', onclick: quickLog }, el('span', { class: 'qa-i' }, '📝'), 'Log'),
+    el('button', { class: 'qa', onclick: () => openEquipmentForm() }, el('span', { class: 'qa-i' }, '➕'), 'Add'),
+    el('button', { class: 'qa', onclick: () => openScanner(scanLookup) }, el('span', { class: 'qa-i' }, '⧉'), 'Scan')));
+
+  // Fleet stats strip
+  const ytd = Store.records().filter(r => (r.date || '').slice(0, 4) === todayISO().slice(0, 4))
+    .reduce((s, r) => s + (Number(r.cost) || 0), 0);
+  view.appendChild(el('div', { class: 'usage-box', style: 'margin-top:12px' },
+    el('div', { class: 'stat' }, el('div', { class: 'sval' }, String(eqs.length)), el('div', { class: 'slabel' }, 'Machines')),
+    el('div', { class: 'stat' }, el('div', { class: 'sval' }, String(ranked.filter(x => x.st.status !== 'ok').length)), el('div', { class: 'slabel' }, 'Due')),
+    el('div', { class: 'stat' }, el('div', { class: 'sval', style: 'font-size:18px' }, ytd > 0 ? fmtMoney(ytd) : '—'), el('div', { class: 'slabel' }, 'Spent ' + todayISO().slice(0, 4)))));
 
   // Backup reminder
   if (shouldRemindBackup()) view.appendChild(backupReminderCard());
@@ -851,6 +979,7 @@ function renderEquipmentDetail(view, id) {
   const actions = el('div', { class: 'stack' },
     el('button', { class: 'btn', onclick: () => openRecordForm(eq.id) }, '＋ Log Maintenance'),
     el('button', { class: 'btn secondary', onclick: () => openTaskForm(eq.id) }, '＋ Add Service Schedule'),
+    el('button', { class: 'btn secondary', onclick: () => openTemplatePicker(eq) }, '✨ Add from Template'),
     el('button', { class: 'btn secondary', onclick: () => openConsumableForm(eq.id) }, '＋ Add Consumable / Part'));
   view.appendChild(actions);
 
@@ -904,6 +1033,7 @@ function renderEquipmentDetail(view, id) {
   view.appendChild(el('div', { class: 'spacer' }));
   view.appendChild(el('div', { class: 'spacer' }));
   view.appendChild(el('div', { class: 'stack' },
+    el('button', { class: 'btn secondary', onclick: () => printServiceReport(eq) }, '🖨️ Service Report (PDF)'),
     el('button', { class: 'btn secondary', onclick: () => openEquipmentForm(eq) }, 'Edit Details'),
     el('button', {
       class: 'btn danger',
@@ -1319,6 +1449,75 @@ async function openManual(m) {
   } catch (e) { alert('Could not open the file.'); }
 }
 
+/* --------------------------- Service report -------------------------- */
+// A clean, printable report per machine — use the print dialog to "Save to PDF".
+function printServiceReport(eq) {
+  const unit = UNIT_LABEL[eq.usageUnit];
+  const tasks = Store.tasksFor(eq.id).map(t => ({ t, st: taskStatus(t) })).sort((a, b) => a.st.sort - b.st.sort);
+  const parts = Store.consumablesFor(eq.id).slice().sort((a, b) => CONSUMABLE_ORDER.indexOf(a.type) - CONSUMABLE_ORDER.indexOf(b.type));
+  const records = Store.recordsFor(eq.id);
+  const total = records.reduce((s, r) => s + (Number(r.cost) || 0), 0);
+
+  const tbl = (headers, rows) => {
+    const t = el('table', { class: 'rpt-tbl' });
+    t.appendChild(el('tr', {}, ...headers.map(h => el('th', {}, h))));
+    rows.forEach(r => t.appendChild(el('tr', {}, ...r.map(c => el('td', {}, c == null ? '' : String(c))))));
+    return t;
+  };
+
+  const body = el('div', { class: 'report-body' },
+    el('h1', {}, eq.name),
+    el('div', { class: 'rpt-sub' }, [eq.year, eq.make, eq.model].filter(Boolean).join(' ') || CATEGORIES[eq.category].label),
+    el('div', { class: 'rpt-meta' },
+      `${CATEGORIES[eq.category].label}${eq.identifier ? ' · S/N ' + eq.identifier : ''}`
+      + (eq.usageUnit !== 'none' ? ` · ${fmtNum(eq.currentUsage || 0)} ${unit}` : '')
+      + ` · Report ${fmtDate(todayISO())}`));
+
+  if (tasks.length) {
+    body.appendChild(el('h2', {}, 'Service Schedules'));
+    body.appendChild(tbl(['Task', 'Interval', 'Next due', 'Status'],
+      tasks.map(({ t, st }) => [t.title, intervalText(t), st.due, st.text])));
+  }
+  if (parts.length) {
+    body.appendChild(el('h2', {}, 'Parts & Consumables'));
+    body.appendChild(tbl(['Type', 'Spec', 'Part #', 'Qty', 'On hand'],
+      parts.map(c => [CONSUMABLE_TYPES[c.type] ? CONSUMABLE_TYPES[c.type].label : '', c.spec || '', c.partNumber || '', c.qty || '', stockTracked(c) ? fmtNum(c.onHand) : ''])));
+  }
+  body.appendChild(el('h2', {}, 'Maintenance History'));
+  if (records.length) {
+    body.appendChild(tbl(['Date', unit ? unit : 'Reading', 'Service', 'Cost', 'Notes'],
+      records.map(r => [fmtDate(r.date),
+        (r.usageAtService !== '' && r.usageAtService != null) ? fmtNum(r.usageAtService) : '',
+        r.title,
+        (r.cost !== '' && r.cost != null) ? fmtMoney(r.cost) : '',
+        r.notes || ''])));
+    body.appendChild(el('div', { class: 'rpt-total' }, `Total recorded spend: ${fmtMoney(total)} · ${records.length} ${records.length > 1 ? 'entries' : 'entry'}`));
+  } else {
+    body.appendChild(el('div', { class: 'rpt-meta' }, 'No maintenance logged yet.'));
+  }
+  body.appendChild(el('div', { class: 'rpt-foot' }, 'Generated by Tractor Shed'));
+
+  const host = el('div', { id: 'report' },
+    el('div', { class: 'report-toolbar' },
+      el('button', { 'data-close': '1', style: 'background:none;border:none;color:#1b5e20;font-size:17px;font-weight:600' }, 'Close'),
+      el('strong', {}, 'Service Report'),
+      el('button', { class: 'btn small', style: 'width:auto', 'data-print': '1' }, 'Print / Save PDF')),
+    body);
+  document.body.appendChild(host);
+  document.body.classList.add('report-open');
+  host.querySelector('[data-close]').onclick = () => { host.remove(); document.body.classList.remove('report-open'); };
+  host.querySelector('[data-print]').onclick = () => window.print();
+
+  // Add a scannable QR that deep-links to this machine (lazy-load encoder).
+  ensureScanner().then(() => {
+    try {
+      const url = location.origin + location.pathname + '#/equipment/' + encodeURIComponent(eq.id);
+      const svg = new ZXing.BrowserQRCodeSvgWriter().write(url, 132, 132);
+      body.appendChild(el('div', { class: 'rpt-qr' }, svg, el('div', { class: 'rpt-meta' }, 'Scan to open this machine')));
+    } catch (e) { /* ignore */ }
+  }).catch(() => {});
+}
+
 async function shareShoppingList(low, serviceParts) {
   const line = (c) => {
     const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
@@ -1350,7 +1549,10 @@ function openModal(buildSheet) {
   modal.hidden = false;
   modal.onclick = (e) => { if (e.target === modal) closeModal(); };
 }
-function closeModal() { $('#modal').hidden = true; $('#sheet').innerHTML = ''; }
+function closeModal() {
+  if (_scanStop) { try { _scanStop(); } catch (e) {} }
+  $('#modal').hidden = true; $('#sheet').innerHTML = '';
+}
 
 function sheetHead(title, onSave, saveLabel = 'Save') {
   return el('div', { class: 'sheet-head' },
@@ -1436,9 +1638,8 @@ function openEquipmentForm(existing) {
       el('div', { class: 'field inline2' },
         el('div', {}, el('label', {}, 'Make'), makeI),
         el('div', {}, el('label', {}, 'Model'), modelI)),
-      el('div', { class: 'field inline2' },
-        el('div', {}, el('label', {}, 'Year'), yearI),
-        el('div', {}, el('label', {}, 'Serial / VIN'), idI)),
+      field('Year', yearI),
+      field('Serial / VIN', withScanButton(idI), 'Tap Scan to read a barcode/VIN.'),
       field('Usage meter', unitSeg),
       usageField,
       field('Notes', notesI),
@@ -1471,6 +1672,57 @@ function partsChecklist(eqId, preselected) {
   return { node: card, getSelected: () => controls.filter(x => x.chk.checked).map(x => x.c.id) };
 }
 
+function daysLabel(v) {
+  v = Number(v);
+  if (v % 365 === 0 && v >= 365) return `Every ${v / 365} year${v / 365 > 1 ? 's' : ''}`;
+  if (v % 30 === 0 && v >= 30) return `Every ${v / 30} month${v / 30 > 1 ? 's' : ''}`;
+  if (v % 7 === 0 && v >= 7) return `Every ${v / 7} week${v / 7 > 1 ? 's' : ''}`;
+  return `Every ${v} days`;
+}
+
+/* ---- Apply a starter set of schedules for the machine's category ---- */
+function openTemplatePicker(eq) {
+  const tmpl = SCHEDULE_TEMPLATES[eq.category] || [];
+  const canUsage = eq.usageUnit !== 'none';
+  openModal((sheet) => {
+    const card = el('div', { class: 'card' });
+    const controls = tmpl.map(t => {
+      const useUsage = canUsage && t.u != null;
+      const label = useUsage ? `Every ${fmtNum(t.u)} ${UNIT_LABEL[eq.usageUnit]}` : daysLabel(t.d != null ? t.d : 90);
+      const chk = el('input', { type: 'checkbox', checked: true });
+      card.appendChild(el('div', { class: 'row', style: 'cursor:pointer;gap:10px', onclick: (e) => { if (e.target !== chk) chk.checked = !chk.checked; } },
+        chk,
+        el('div', { class: 'grow' },
+          el('div', { class: 'primary', style: 'font-size:15px' }, t.title),
+          el('div', { class: 'secondary' }, label))));
+      return { t, chk, useUsage };
+    });
+    const apply = () => {
+      let n = 0;
+      controls.forEach(({ t, chk, useUsage }) => {
+        if (!chk.checked) return;
+        Store.upsertTask({
+          id: uid(), equipmentId: eq.id, title: t.title,
+          intervalType: useUsage ? 'usage' : 'days',
+          intervalValue: useUsage ? t.u : (t.d != null ? t.d : 90),
+          lastDoneDate: todayISO(),
+          lastDoneUsage: useUsage ? (eq.currentUsage || 0) : 0,
+          leadDays: '', leadUsage: '', partIds: [], instructions: '',
+        });
+        n++;
+      });
+      closeModal();
+      toast(n ? `${n} schedule${n > 1 ? 's' : ''} added` : 'Nothing added');
+      router();
+    };
+    sheet.append(
+      sheetHead('Add from Template', apply, 'Add'),
+      el('div', { class: 'muted', style: 'margin:0 4px 12px' },
+        `Starter schedules for ${CATEGORIES[eq.category].label.toLowerCase()}s — uncheck any you don't want, then edit intervals/dates afterward.`),
+      card);
+  });
+}
+
 /* ---- Service schedule (task) form ---- */
 function openTaskForm(eqId, existing) {
   const eq = Store.getEquipment(eqId);
@@ -1479,6 +1731,7 @@ function openTaskForm(eqId, existing) {
     id: uid(), equipmentId: eqId, title: '',
     intervalType: eq.usageUnit === 'none' ? 'days' : 'usage',
     intervalValue: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0, partIds: [], instructions: '',
+    leadDays: '', leadUsage: '',
   };
   let intervalType = task.intervalType;
   const parts = partsChecklist(eqId, task.partIds);
@@ -1487,6 +1740,7 @@ function openTaskForm(eqId, existing) {
     const titleI = el('input', { type: 'text', value: task.title, placeholder: 'e.g. Engine oil & filter' });
     const instrI = el('textarea', { placeholder: 'Step-by-step how-to, torque specs, fill amounts, tips…', style: 'min-height:110px' }, task.instructions || '');
     const valueI = el('input', { type: 'number', value: task.intervalValue, placeholder: '0', inputmode: 'decimal', step: 'any' });
+    const leadI = el('input', { type: 'number', value: (intervalType === 'usage' ? task.leadUsage : task.leadDays) ?? '', placeholder: '0', inputmode: 'decimal', step: 'any' });
     const lastDateI = el('input', { type: 'date', value: task.lastDoneDate || todayISO() });
     const lastUsageI = el('input', { type: 'number', value: task.lastDoneUsage ?? '', placeholder: '0', inputmode: 'decimal', step: 'any' });
 
@@ -1494,10 +1748,14 @@ function openTaskForm(eqId, existing) {
     const canUsage = eq.usageUnit !== 'none';
 
     const valueField = field('', valueI);
+    const leadField = field('', leadI, 'Flag it as “due soon” this far ahead. Leave blank for the default.');
     const updateValueLabel = () => {
       valueField.querySelector('label').textContent = intervalType === 'usage'
         ? `Interval (${unit})` : 'Interval (days)';
       valueI.placeholder = intervalType === 'usage' ? `e.g. 100` : `e.g. 90`;
+      leadField.querySelector('label').textContent = intervalType === 'usage'
+        ? `Remind me ahead (${unit})` : 'Remind me ahead (days)';
+      leadI.placeholder = intervalType === 'usage' ? 'e.g. 20' : 'e.g. 7';
     };
 
     const lastUsageField = field(`Last done at (${unit})`, lastUsageI,
@@ -1524,6 +1782,7 @@ function openTaskForm(eqId, existing) {
     const save = () => {
       if (!titleI.value.trim()) { toast('Enter a task name'); titleI.focus(); return; }
       if (!valueI.value || Number(valueI.value) <= 0) { toast('Enter an interval'); valueI.focus(); return; }
+      const leadVal = leadI.value === '' ? '' : Number(leadI.value);
       Store.upsertTask({
         id: task.id,
         equipmentId: eqId,
@@ -1532,6 +1791,8 @@ function openTaskForm(eqId, existing) {
         intervalValue: Number(valueI.value),
         lastDoneDate: lastDateI.value || todayISO(),
         lastDoneUsage: intervalType === 'usage' ? Number(lastUsageI.value || 0) : (task.lastDoneUsage ?? 0),
+        leadDays: intervalType === 'days' ? leadVal : (task.leadDays ?? ''),
+        leadUsage: intervalType === 'usage' ? leadVal : (task.leadUsage ?? ''),
         partIds: parts.getSelected(),
         instructions: instrI.value.trim(),
       });
@@ -1545,6 +1806,7 @@ function openTaskForm(eqId, existing) {
       field('Task', titleI, 'e.g. Oil change, grease fittings, air filter'),
       field('Repeat', typeSeg, canUsage ? null : 'This item has no usage meter, so schedules are time-based.'),
       valueField,
+      leadField,
       lastDateField,
       canUsage ? lastUsageField : null,
       el('div', { class: 'field' },
@@ -1620,9 +1882,8 @@ function openConsumableForm(eqId, existing) {
       sheetHead(isEdit ? 'Edit Part' : 'Add Consumable / Part', save),
       field('Type', typeGrid),
       specField,
-      el('div', { class: 'field inline2' },
-        el('div', {}, el('label', {}, 'Part number'), partI),
-        el('div', {}, el('label', {}, 'Qty / capacity'), qtyI)),
+      field('Part number', withScanButton(partI), 'Tap Scan to read the barcode.'),
+      field('Qty / capacity', qtyI),
       el('div', { class: 'field inline2' },
         el('div', {}, el('label', {}, 'On hand'), onHandI),
         el('div', {}, el('label', {}, 'Reorder at'), reorderI)),
@@ -1853,6 +2114,36 @@ function handleAdd() {
   }
 }
 
+// Handle home-screen quick-action shortcuts (manifest "shortcuts").
+function handleShortcut() {
+  let action = '';
+  try { action = new URLSearchParams(location.search).get('action') || ''; } catch (e) {}
+  if (!action) return;
+  // clean the URL so the action doesn't repeat on reload
+  try { history.replaceState(null, '', location.pathname + location.hash); } catch (e) {}
+  if (action === 'log') quickLog();
+  else if (action === 'add') openEquipmentForm();
+  else if (action === 'shopping') navigate('#/shopping');
+}
+
+// Quick "log maintenance" — pick the machine first if there's more than one.
+function quickLog() {
+  const eqs = Store.equipment();
+  if (!eqs.length) { openEquipmentForm(); return; }
+  if (eqs.length === 1) { openRecordForm(eqs[0].id); return; }
+  openModal((sheet) => {
+    const card = el('div', { class: 'card' });
+    eqs.forEach(eq => card.appendChild(el('div', { class: 'row', onclick: () => { closeModal(); openRecordForm(eq.id); } },
+      el('span', { class: 'emoji' }, CATEGORIES[eq.category].emoji),
+      el('div', { class: 'grow' }, el('div', { class: 'primary' }, eq.name)),
+      el('span', { class: 'chev' }, '›'))));
+    sheet.append(
+      el('div', { class: 'sheet-head' }, el('span', { style: 'width:54px' }), el('h3', {}, 'Log maintenance on…'),
+        el('button', { class: 'link plain', onclick: closeModal }, 'Cancel')),
+      card);
+  });
+}
+
 // Adding a part from the global list needs to know which machine it belongs to.
 function addPartChooseEquipment() {
   const eqs = Store.equipment();
@@ -1885,6 +2176,9 @@ function init() {
   window.addEventListener('hashchange', router);
   if (!location.hash) location.hash = '#/dashboard';
   router();
+
+  // Home-screen shortcuts (?action=…)
+  handleShortcut();
 
   // Reminders: badge the icon and nudge about overdue work on open / return.
   updateBadge();
