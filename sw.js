@@ -1,7 +1,7 @@
 /* Tractor Shed service worker.
    App shell = network-first (updates show up promptly when online),
    static assets (icons, scanner bundle) = cache-first. Offline still works. */
-const CACHE = 'shedlog-v12';
+const CACHE = 'shedlog-v13';
 const ASSETS = [
   './',
   './index.html',

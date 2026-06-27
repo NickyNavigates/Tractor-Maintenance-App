@@ -3,7 +3,7 @@
 
 'use strict';
 
-const APP_VERSION = 'Build 12';
+const APP_VERSION = 'Build 13';
 
 /* ----------------------------- Constants ----------------------------- */
 
@@ -557,13 +557,6 @@ function withScanButton(input, onScan) {
 }
 
 /* ------------------------------ Routing ------------------------------ */
-
-const routes = {
-  '/dashboard': renderDashboard,
-  '/equipment': renderEquipmentList,
-  '/history':   renderHistory,
-  '/equipment/': renderEquipmentDetail, // '#/equipment/:id'
-};
 
 function currentRoute() {
   const hash = location.hash || '#/dashboard';
