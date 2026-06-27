@@ -17,7 +17,16 @@ Once the app is published to a web address (see **Publishing** below), installin
 
 You'll now have a **ShedLog** icon on your home screen. Open it and it runs like a normal app — full screen, offline, and your data stays on your phone.
 
-> **Where's my data?** Everything is saved locally on your device. Nothing is uploaded anywhere. (Because of that, deleting the app or clearing Safari's data will erase your records — handy to know before you do either.)
+> **Where's my data?** Everything is saved locally on your device. Nothing is uploaded anywhere. (Because of that, deleting the app or clearing Safari's data will erase your records — so use the built-in backup below to keep a copy.)
+
+### 💾 Backing up to the Files app / iCloud Drive
+
+On the **Dashboard** there's a **Data & Backup** section:
+
+- **Export / Save to Files** — creates a backup file (`shedlog-backup-YYYY-MM-DD.json`). On iPhone, the share sheet pops up and you tap **Save to Files** to store it in iCloud Drive or "On My iPhone". You can also AirDrop or email it from there.
+- **Restore from Backup** — pick a backup file (from the Files app) to load all your equipment, schedules, and history back. This also lets you move your data to a new phone.
+
+Export every so often so you always have a copy outside the app.
 
 ---
 

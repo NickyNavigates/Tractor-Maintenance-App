@@ -230,6 +230,9 @@ function renderDashboard(view) {
     emptyState(view, '🚜', 'Welcome to ShedLog',
       'Track maintenance for your tractors, implements, tools and vehicles. Start by adding your first piece of equipment.',
       'Add Equipment', () => openEquipmentForm());
+    view.appendChild(el('div', { class: 'center', style: 'margin-top:4px' },
+      el('button', { class: 'btn secondary', style: 'width:auto;margin:0 auto', onclick: importData },
+        'Restore from a Backup')));
     return { title: 'Dashboard' };
   }
 
@@ -273,7 +276,93 @@ function renderDashboard(view) {
   eqs.forEach(eq => eqCard.appendChild(equipmentRow(eq)));
   view.appendChild(eqCard);
 
+  // Data & backup
+  view.appendChild(el('div', { class: 'section-title' }, 'Data & Backup'));
+  view.appendChild(el('div', { class: 'card' },
+    el('div', { class: 'row', onclick: exportData },
+      el('span', { class: 'emoji' }, '⬆️'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'Export / Save to Files'),
+        el('div', { class: 'secondary' }, 'Back up all data as a file')),
+      el('span', { class: 'chev' }, '›')),
+    el('div', { class: 'row', onclick: importData },
+      el('span', { class: 'emoji' }, '⬇️'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'Restore from Backup'),
+        el('div', { class: 'secondary' }, 'Replace data from a backup file')),
+      el('span', { class: 'chev' }, '›'))));
+  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:12px;padding:0 16px;line-height:1.4' },
+    'Your data is stored only on this device. Export regularly to keep a copy in your Files app or iCloud Drive.'));
+
   return { title: 'Dashboard' };
+}
+
+/* ---------------------------- Backup / restore ----------------------- */
+
+// Export all data as a JSON file. On iPhone the share sheet offers "Save to Files".
+async function exportData() {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const filename = `shedlog-backup-${stamp}.json`;
+  const payload = JSON.stringify({ app: 'ShedLog', version: 1, exportedAt: new Date().toISOString(), ...Store.data }, null, 2);
+
+  // Preferred path on iOS: native share sheet with a file attachment.
+  try {
+    const file = new File([payload], filename, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'ShedLog Backup' });
+      return;
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // user cancelled the share sheet
+  }
+
+  // Fallback: trigger a normal file download.
+  try {
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    toast('Backup file created');
+  } catch (e) {
+    alert('Could not export the backup on this device.');
+  }
+}
+
+// Restore from a previously exported backup file.
+function importData() {
+  const input = el('input', { type: 'file', accept: 'application/json,.json', style: 'display:none' });
+  document.body.appendChild(input);
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    input.remove();
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || !Array.isArray(parsed.equipment)) throw new Error('invalid');
+        const counts = `${parsed.equipment.length} item(s), ${(parsed.records || []).length} record(s)`;
+        if (!confirm(`Restore this backup (${counts})?\n\nThis replaces ALL data currently on this device.`)) return;
+        Store.data = {
+          equipment: parsed.equipment || [],
+          records: parsed.records || [],
+          tasks: parsed.tasks || [],
+        };
+        Store.save();
+        toast('Backup restored');
+        navigate('#/dashboard');
+        router();
+      } catch (e) {
+        alert('That file is not a valid ShedLog backup.');
+      }
+    };
+    reader.onerror = () => alert('Could not read that file.');
+    reader.readAsText(f);
+  });
+  input.click();
 }
 
 function taskRow(x, showEquip) {
