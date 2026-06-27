@@ -57,6 +57,7 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 
 - **Four equipment types** — tractors 🚜, implements 🔧, tools 🛠️, and vehicles 🚛, each on its own usage meter (engine hours, miles, or none).
 - **Service schedules** — recurring maintenance defined by usage (e.g. *oil every 100 hours*) **or** time (e.g. *grease every 90 days*). The dashboard shows what's **due soon** or **overdue**.
+- **Consumables & parts reference** — per machine, keep a list of the oils, greases, fluids, filters, belts, tires, batteries, plugs, blades, and other parts it needs, with the spec/grade, part number, and quantity/capacity. So when it's time to service, you know exactly what to buy.
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.

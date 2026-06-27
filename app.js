@@ -14,6 +14,23 @@ const CATEGORIES = {
 const CATEGORY_ORDER = ['tractor', 'implement', 'vehicle', 'tool'];
 
 const UNIT_LABEL = { hours: 'hours', miles: 'miles', none: '' };
+
+// Consumable / parts reference types (oil, grease, belts, etc.).
+const CONSUMABLE_TYPES = {
+  oil:     { label: 'Engine oil',  emoji: '🛢️' },
+  hydoil:  { label: 'Hyd/trans oil', emoji: '🛢️' },
+  grease:  { label: 'Grease',      emoji: '🧴' },
+  fluid:   { label: 'Fluid',       emoji: '💧' },
+  filter:  { label: 'Filter',      emoji: '🌀' },
+  belt:    { label: 'Belt',        emoji: '➰' },
+  tire:    { label: 'Tire',        emoji: '🛞' },
+  battery: { label: 'Battery',     emoji: '🔋' },
+  spark:   { label: 'Spark plug',  emoji: '🔌' },
+  blade:   { label: 'Blade/bit',   emoji: '🔪' },
+  other:   { label: 'Other part',  emoji: '📦' },
+};
+const CONSUMABLE_ORDER = ['oil', 'hydoil', 'fluid', 'grease', 'filter', 'belt', 'tire', 'battery', 'spark', 'blade', 'other'];
+
 const SOON_DAYS = 14;   // time-based task is "due soon" within this many days
 const SOON_USAGE_FRACTION = 0.1; // usage-based task is "due soon" within 10% of interval
 const BACKUP_REMINDER_DAYS = 14; // nudge to back up if last backup is older than this
@@ -24,12 +41,12 @@ const BACKUP_SNOOZE_DAYS = 7;    // how long "Later" hides the reminder
 const STORE_KEY = 'shedlog.v1';
 
 const Store = {
-  data: { equipment: [], records: [], tasks: [] },
+  data: { equipment: [], records: [], tasks: [], consumables: [] },
 
   load() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
-      if (raw) this.data = Object.assign({ equipment: [], records: [], tasks: [] }, JSON.parse(raw));
+      if (raw) this.data = Object.assign({ equipment: [], records: [], tasks: [], consumables: [] }, JSON.parse(raw));
     } catch (e) { console.error('load failed', e); }
   },
   save() {
@@ -46,9 +63,10 @@ const Store = {
     this.save();
   },
   deleteEquipment(id) {
-    this.data.equipment = this.data.equipment.filter(e => e.id !== id);
-    this.data.records   = this.data.records.filter(r => r.equipmentId !== id);
-    this.data.tasks     = this.data.tasks.filter(t => t.equipmentId !== id);
+    this.data.equipment   = this.data.equipment.filter(e => e.id !== id);
+    this.data.records     = this.data.records.filter(r => r.equipmentId !== id);
+    this.data.tasks       = this.data.tasks.filter(t => t.equipmentId !== id);
+    this.data.consumables = this.data.consumables.filter(c => c.equipmentId !== id);
     this.save();
   },
 
@@ -71,6 +89,16 @@ const Store = {
   },
   addRecord(r) { this.data.records.push(r); this.save(); },
   deleteRecord(id) { this.data.records = this.data.records.filter(r => r.id !== id); this.save(); },
+
+  // consumables (required parts/fluids reference per equipment)
+  consumablesFor(eqId) { return this.data.consumables.filter(c => c.equipmentId === eqId); },
+  getConsumable(id) { return this.data.consumables.find(c => c.id === id); },
+  upsertConsumable(c) {
+    const i = this.data.consumables.findIndex(x => x.id === c.id);
+    if (i >= 0) this.data.consumables[i] = c; else this.data.consumables.push(c);
+    this.save();
+  },
+  deleteConsumable(id) { this.data.consumables = this.data.consumables.filter(c => c.id !== id); this.save(); },
 };
 
 /* Backup metadata, kept separate from the data so it never travels inside a backup file. */
@@ -409,6 +437,7 @@ function importData() {
           equipment: parsed.equipment || [],
           records: parsed.records || [],
           tasks: parsed.tasks || [],
+          consumables: parsed.consumables || [],
         };
         Store.save();
         toast('Backup restored');
@@ -499,6 +528,9 @@ function renderEquipmentDetail(view, id) {
     el('div', { class: 'sval' }, String(Store.tasksFor(eq.id).length)),
     el('div', { class: 'slabel' }, 'Schedules')));
   stats.appendChild(el('div', { class: 'stat' },
+    el('div', { class: 'sval' }, String(Store.consumablesFor(eq.id).length)),
+    el('div', { class: 'slabel' }, 'Parts')));
+  stats.appendChild(el('div', { class: 'stat' },
     el('div', { class: 'sval' }, String(records.length)),
     el('div', { class: 'slabel' }, 'Logged')));
   view.appendChild(stats);
@@ -507,7 +539,8 @@ function renderEquipmentDetail(view, id) {
   view.appendChild(el('div', { class: 'spacer' }));
   const actions = el('div', { class: 'stack' },
     el('button', { class: 'btn', onclick: () => openRecordForm(eq.id) }, '＋ Log Maintenance'),
-    el('button', { class: 'btn secondary', onclick: () => openTaskForm(eq.id) }, '＋ Add Service Schedule'));
+    el('button', { class: 'btn secondary', onclick: () => openTaskForm(eq.id) }, '＋ Add Service Schedule'),
+    el('button', { class: 'btn secondary', onclick: () => openConsumableForm(eq.id) }, '＋ Add Consumable / Part'));
   view.appendChild(actions);
 
   // Schedules
@@ -524,6 +557,17 @@ function renderEquipmentDetail(view, id) {
           el('div', { class: 'secondary' }, intervalText(task) + ' · next ' + st.due)),
         statusPill(st)));
     });
+    view.appendChild(card);
+  }
+
+  // Consumables & parts reference
+  const consumables = Store.consumablesFor(eq.id)
+    .slice()
+    .sort((a, b) => CONSUMABLE_ORDER.indexOf(a.type) - CONSUMABLE_ORDER.indexOf(b.type));
+  if (consumables.length) {
+    view.appendChild(el('div', { class: 'section-title' }, 'Consumables & Parts'));
+    const card = el('div', { class: 'card' });
+    consumables.forEach(c => card.appendChild(consumableRow(c)));
     view.appendChild(card);
   }
 
@@ -574,6 +618,23 @@ function recordRow(r, eq) {
   return el('div', { class: 'row', onclick: () => openRecordView(r, eq) },
     el('div', { class: 'grow' },
       el('div', { class: 'primary' }, r.title),
+      el('div', { class: 'secondary' }, bits.join(' · '))),
+    el('span', { class: 'chev' }, '›'));
+}
+
+function consumableRow(c) {
+  const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
+  // Primary line: the spec/name (fallback to the type label).
+  const primary = c.spec || type.label;
+  // Secondary line: part number and quantity/capacity if present.
+  const bits = [];
+  if (c.partNumber) bits.push('#' + c.partNumber);
+  if (c.qty) bits.push(c.qty);
+  if (!bits.length) bits.push(type.label);
+  return el('div', { class: 'row', onclick: () => openConsumableForm(c.equipmentId, c) },
+    el('span', { class: 'emoji' }, type.emoji),
+    el('div', { class: 'grow' },
+      el('div', { class: 'primary' }, primary),
       el('div', { class: 'secondary' }, bits.join(' · '))),
     el('span', { class: 'chev' }, '›'));
 }
@@ -799,6 +860,72 @@ function openTaskForm(eqId, existing) {
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
         if (confirm('Delete this schedule?')) { Store.deleteTask(task.id); closeModal(); toast('Schedule deleted'); router(); }
       } }, 'Delete Schedule') : null,
+    );
+  });
+}
+
+/* ---- Consumable / part form ---- */
+function openConsumableForm(eqId, existing) {
+  const isEdit = !!existing;
+  const c = existing || { id: uid(), equipmentId: eqId, type: 'oil', spec: '', partNumber: '', qty: '', notes: '' };
+  let selectedType = c.type || 'oil';
+
+  openModal((sheet) => {
+    const specI = el('input', { type: 'text', value: c.spec || '', placeholder: 'e.g. 15W-40 / Donaldson P55' });
+    const partI = el('input', { type: 'text', value: c.partNumber || '', placeholder: 'e.g. RE504836' });
+    const qtyI = el('input', { type: 'text', value: c.qty || '', placeholder: 'e.g. 8.5 qt, 2 ea, 1/2" x 48"' });
+    const notesI = el('textarea', { placeholder: 'Where it goes, brand preference, source…' }, c.notes || '');
+
+    const specField = field('Spec / name', specI, 'The grade, size, or product — what to buy.');
+    const updateSpecHint = () => {
+      const t = CONSUMABLE_TYPES[selectedType];
+      specI.placeholder = ({
+        oil: 'e.g. 15W-40', hydoil: 'e.g. Hy-Gard / 303', grease: 'e.g. Moly EP2',
+        fluid: 'e.g. DOT 3 brake fluid', filter: 'e.g. Donaldson P55-XXXX', belt: 'e.g. 1/2" x 48" V-belt',
+        tire: 'e.g. 14.9-28 R1', battery: 'e.g. Group 65, 850 CCA', spark: 'e.g. NGK BPR6ES',
+        blade: 'e.g. 1/4" chain, 72 DL', other: 'e.g. part name',
+      })[selectedType] || 'e.g. grade or size';
+    };
+
+    const typeGrid = el('div', { class: 'cat-grid', style: 'grid-template-columns:1fr 1fr 1fr' },
+      ...CONSUMABLE_ORDER.map(t =>
+        el('button', { class: selectedType === t ? 'on' : '', onclick: () => {
+          selectedType = t;
+          typeGrid.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', CONSUMABLE_ORDER[i] === t));
+          updateSpecHint();
+        } }, el('span', { class: 'cemoji', style: 'font-size:24px' }, CONSUMABLE_TYPES[t].emoji),
+           el('span', { style: 'font-size:12px' }, CONSUMABLE_TYPES[t].label))));
+    updateSpecHint();
+
+    const save = () => {
+      if (!specI.value.trim() && !partI.value.trim()) {
+        toast('Enter a spec or part number'); specI.focus(); return;
+      }
+      Store.upsertConsumable({
+        id: c.id,
+        equipmentId: eqId,
+        type: selectedType,
+        spec: specI.value.trim(),
+        partNumber: partI.value.trim(),
+        qty: qtyI.value.trim(),
+        notes: notesI.value.trim(),
+      });
+      closeModal();
+      toast(isEdit ? 'Saved' : 'Part added');
+      router();
+    };
+
+    sheet.append(
+      sheetHead(isEdit ? 'Edit Part' : 'Add Consumable / Part', save),
+      field('Type', typeGrid),
+      specField,
+      el('div', { class: 'field inline2' },
+        el('div', {}, el('label', {}, 'Part number'), partI),
+        el('div', {}, el('label', {}, 'Qty / capacity'), qtyI)),
+      field('Notes', notesI),
+      isEdit ? el('button', { class: 'btn danger', onclick: () => {
+        if (confirm('Delete this part?')) { Store.deleteConsumable(c.id); closeModal(); toast('Part deleted'); router(); }
+      } }, 'Delete Part') : null,
     );
   });
 }
