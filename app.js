@@ -16,6 +16,8 @@ const CATEGORY_ORDER = ['tractor', 'implement', 'vehicle', 'tool'];
 const UNIT_LABEL = { hours: 'hours', miles: 'miles', none: '' };
 const SOON_DAYS = 14;   // time-based task is "due soon" within this many days
 const SOON_USAGE_FRACTION = 0.1; // usage-based task is "due soon" within 10% of interval
+const BACKUP_REMINDER_DAYS = 14; // nudge to back up if last backup is older than this
+const BACKUP_SNOOZE_DAYS = 7;    // how long "Later" hides the reminder
 
 /* ------------------------------- Store ------------------------------- */
 
@@ -69,6 +71,21 @@ const Store = {
   },
   addRecord(r) { this.data.records.push(r); this.save(); },
   deleteRecord(id) { this.data.records = this.data.records.filter(r => r.id !== id); this.save(); },
+};
+
+/* Backup metadata, kept separate from the data so it never travels inside a backup file. */
+const META_KEY = 'shedlog.meta.v1';
+const Meta = {
+  data: { lastBackupAt: null, snoozeUntil: null },
+  load() {
+    try {
+      const raw = localStorage.getItem(META_KEY);
+      if (raw) this.data = Object.assign(this.data, JSON.parse(raw));
+    } catch (e) { /* ignore */ }
+  },
+  save() { try { localStorage.setItem(META_KEY, JSON.stringify(this.data)); } catch (e) {} },
+  markBackedUp() { this.data.lastBackupAt = new Date().toISOString(); this.data.snoozeUntil = null; this.save(); },
+  snooze() { this.data.snoozeUntil = addDays(todayISO(), BACKUP_SNOOZE_DAYS); this.save(); },
 };
 
 /* ------------------------------ Helpers ------------------------------ */
@@ -261,6 +278,9 @@ function renderDashboard(view) {
         el('div', { class: 'bsub' }, ranked.length ? 'No maintenance due right now' : 'Add service schedules to get reminders'))));
   }
 
+  // Backup reminder
+  if (shouldRemindBackup()) view.appendChild(backupReminderCard());
+
   // Upcoming list
   const upcoming = ranked.filter(x => x.st.status !== 'ok').slice(0, 12);
   if (upcoming.length) {
@@ -283,7 +303,7 @@ function renderDashboard(view) {
       el('span', { class: 'emoji' }, '⬆️'),
       el('div', { class: 'grow' },
         el('div', { class: 'primary' }, 'Export / Save to Files'),
-        el('div', { class: 'secondary' }, 'Back up all data as a file')),
+        el('div', { class: 'secondary' }, backupStatusText())),
       el('span', { class: 'chev' }, '›')),
     el('div', { class: 'row', onclick: importData },
       el('span', { class: 'emoji' }, '⬇️'),
@@ -310,6 +330,8 @@ async function exportData() {
     const file = new File([payload], filename, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       await navigator.share({ files: [file], title: 'ShedLog Backup' });
+      Meta.markBackedUp();
+      router();
       return;
     }
   } catch (e) {
@@ -325,10 +347,47 @@ async function exportData() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
-    toast('Backup file created');
+    Meta.markBackedUp();
+    toast('Backup saved');
+    router();
   } catch (e) {
     alert('Could not export the backup on this device.');
   }
+}
+
+/* Backup reminder helpers */
+function daysSinceBackup() {
+  if (!Meta.data.lastBackupAt) return null;
+  return daysBetween(Meta.data.lastBackupAt.slice(0, 10), todayISO());
+}
+function backupStatusText() {
+  const d = daysSinceBackup();
+  if (d === null) return 'Never backed up';
+  if (d <= 0) return 'Last backed up today';
+  if (d === 1) return 'Last backed up yesterday';
+  return `Last backed up ${d} days ago`;
+}
+function shouldRemindBackup() {
+  if (Store.equipment().length === 0) return false;
+  const snooze = Meta.data.snoozeUntil;
+  if (snooze && daysBetween(todayISO(), snooze) > 0) return false; // still snoozed
+  const d = daysSinceBackup();
+  return d === null || d >= BACKUP_REMINDER_DAYS;
+}
+function backupReminderCard() {
+  const d = daysSinceBackup();
+  const msg = d === null
+    ? "You haven't backed up your data yet."
+    : `It's been ${d} days since your last backup.`;
+  return el('div', { class: 'banner soon', style: 'flex-direction:column;align-items:stretch;gap:12px' },
+    el('div', { style: 'display:flex;align-items:center;gap:14px' },
+      el('div', { class: 'bignum' }, '💾'),
+      el('div', {},
+        el('div', { class: 'blabel' }, 'Time to back up'),
+        el('div', { class: 'bsub' }, msg + ' Save a copy to your Files app.'))),
+    el('div', { style: 'display:flex;gap:10px' },
+      el('button', { class: 'btn small', style: 'flex:1', onclick: exportData }, 'Back Up Now'),
+      el('button', { class: 'btn small secondary', style: 'flex:1', onclick: () => { Meta.snooze(); toast('Reminder snoozed'); router(); } }, 'Later')));
 }
 
 // Restore from a previously exported backup file.
@@ -880,6 +939,7 @@ function handleAdd() {
 
 function init() {
   Store.load();
+  Meta.load();
 
   $('#addBtn').addEventListener('click', handleAdd);
   $('#backBtn').addEventListener('click', () => history.back());

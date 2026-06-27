@@ -26,7 +26,7 @@ On the **Dashboard** there's a **Data & Backup** section:
 - **Export / Save to Files** — creates a backup file (`shedlog-backup-YYYY-MM-DD.json`). On iPhone, the share sheet pops up and you tap **Save to Files** to store it in iCloud Drive or "On My iPhone". You can also AirDrop or email it from there.
 - **Restore from Backup** — pick a backup file (from the Files app) to load all your equipment, schedules, and history back. This also lets you move your data to a new phone.
 
-Export every so often so you always have a copy outside the app.
+The Export row also shows when you last backed up (e.g. *"Last backed up 3 days ago"*), and the dashboard shows a **"Time to back up"** reminder if you've never backed up or it's been more than two weeks. Tap **Back Up Now** to save, or **Later** to snooze it for a week.
 
 ---
 
