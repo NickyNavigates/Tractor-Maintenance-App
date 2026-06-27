@@ -3,7 +3,7 @@
 
 'use strict';
 
-const APP_VERSION = 'Build 9';
+const APP_VERSION = 'Build 10';
 
 /* ----------------------------- Constants ----------------------------- */
 
@@ -695,7 +695,7 @@ async function exportData() {
     toast('Backup saved');
     router();
   } catch (e) {
-    alert('Could not export the backup on this device.');
+    notice('Could not export the backup on this device.', 'Export failed');
   }
 }
 
@@ -752,35 +752,36 @@ function importData() {
         const counts = `${parsed.equipment.length} item(s), ${(parsed.records || []).length} record(s)`
           + (photoCount ? `, ${photoCount} photo(s)` : '')
           + (manualCount ? `, ${manualCount} doc(s)` : '');
-        if (!confirm(`Restore this backup (${counts})?\n\nThis replaces ALL data currently on this device.`)) return;
-        Store.data = {
-          equipment: parsed.equipment || [],
-          records: parsed.records || [],
-          tasks: parsed.tasks || [],
-          consumables: parsed.consumables || [],
-          photos: parsed.photos || [],
-          manuals: parsed.manuals || [],
-        };
-        Store.save();
-        // restore photo + manual blobs into IndexedDB
-        if (parsed.images) {
-          for (const [id, dataUrl] of Object.entries(parsed.images)) {
-            try { await BlobDB.put('img', id, dataUrl); } catch (e) { /* skip */ }
+        askConfirm(`Restore this backup (${counts})?\n\nThis replaces ALL data currently on this device.`, async () => {
+          Store.data = {
+            equipment: parsed.equipment || [],
+            records: parsed.records || [],
+            tasks: parsed.tasks || [],
+            consumables: parsed.consumables || [],
+            photos: parsed.photos || [],
+            manuals: parsed.manuals || [],
+          };
+          Store.save();
+          // restore photo + manual blobs into IndexedDB
+          if (parsed.images) {
+            for (const [id, dataUrl] of Object.entries(parsed.images)) {
+              try { await BlobDB.put('img', id, dataUrl); } catch (e) { /* skip */ }
+            }
           }
-        }
-        if (parsed.files) {
-          for (const [id, dataUrl] of Object.entries(parsed.files)) {
-            try { await BlobDB.put('file', id, dataUrl); } catch (e) { /* skip */ }
+          if (parsed.files) {
+            for (const [id, dataUrl] of Object.entries(parsed.files)) {
+              try { await BlobDB.put('file', id, dataUrl); } catch (e) { /* skip */ }
+            }
           }
-        }
-        toast('Backup restored');
-        navigate('#/dashboard');
-        router();
+          toast('Backup restored');
+          navigate('#/dashboard');
+          router();
+        }, { title: 'Restore backup', confirmLabel: 'Restore', danger: false });
       } catch (e) {
-        alert('That file is not a valid Tractor Shed backup.');
+        notice('That file is not a valid Tractor Shed backup.', 'Invalid file');
       }
     };
-    reader.onerror = () => alert('Could not read that file.');
+    reader.onerror = () => notice('Could not read that file.', 'Read error');
     reader.readAsText(f);
   });
   input.click();
@@ -809,11 +810,18 @@ function equipmentRow(eq) {
     : el('span', { class: 'chev' }, '›');
 
   return el('div', { class: 'row', onclick: () => navigate('#/equipment/' + encodeURIComponent(eq.id)) },
-    el('span', { class: 'emoji' }, CATEGORIES[eq.category].emoji),
+    equipmentAvatar(eq),
     el('div', { class: 'grow' },
       el('div', { class: 'primary' }, eq.name),
       el('div', { class: 'secondary' }, sub)),
     right);
+}
+
+// Machine avatar: its first photo if it has one, otherwise the category emoji.
+function equipmentAvatar(eq) {
+  const photos = Store.photosFor('equipment', eq.id);
+  if (photos.length) return miniThumb(photos[0].id);
+  return el('span', { class: 'emoji' }, CATEGORIES[eq.category].emoji);
 }
 
 function renderEquipmentList(view) {
@@ -952,9 +960,17 @@ function renderEquipmentDetail(view, id) {
   const cat = CATEGORIES[eq.category];
   const unit = UNIT_LABEL[eq.usageUnit];
 
-  // Header
+  // Header — show the machine's first photo as a hero image if it has one
+  const headPhotos = Store.photosFor('equipment', eq.id);
+  let headMedia;
+  if (headPhotos.length) {
+    headMedia = el('img', { class: 'detail-hero', alt: eq.name });
+    BlobDB.get('img', headPhotos[0].id).then(d => { if (d) headMedia.src = d; }).catch(() => {});
+  } else {
+    headMedia = el('div', { class: 'demoji' }, cat.emoji);
+  }
   const head = el('div', { class: 'detail-head' },
-    el('div', { class: 'demoji' }, cat.emoji),
+    headMedia,
     el('h2', {}, eq.name),
     el('div', { class: 'dsub' }, [eq.year, eq.make, eq.model].filter(Boolean).join(' ') || cat.label));
   view.appendChild(head);
@@ -1042,11 +1058,11 @@ function renderEquipmentDetail(view, id) {
     el('button', {
       class: 'btn danger',
       onclick: () => {
-        if (confirm(`Delete "${eq.name}" and all its records? This cannot be undone.`)) {
+        askConfirm(`Delete "${eq.name}" and everything logged for it? This can't be undone.`, () => {
           Store.deleteEquipment(eq.id);
           toast('Equipment deleted');
           navigate('#/equipment');
-        }
+        }, { title: 'Delete equipment', confirmLabel: 'Delete' });
       }
     }, 'Delete Equipment')));
 
@@ -1304,7 +1320,7 @@ function addPhotoFlow(ownerType, ownerId, equipmentId, onDone) {
     try {
       const dataUrl = await fileToCompressedDataURL(f);
       openPhotoEditor({ ownerType, ownerId, equipmentId }, null, dataUrl, onDone);
-    } catch (e) { alert('Could not read that image.'); }
+    } catch (e) { notice('Could not read that image.', 'Read error'); }
   });
   input.click();
 }
@@ -1324,7 +1340,7 @@ function openPhotoEditor(owner, existing, newDataUrl, onDone) {
       } else {
         const id = uid();
         try { await BlobDB.put('img', id, newDataUrl); }
-        catch (e) { alert('Could not save the photo on this device.'); return; }
+        catch (e) { notice('Could not save the photo on this device.', 'Save failed'); return; }
         Store.addPhoto({ id, ownerType: owner.ownerType, ownerId: owner.ownerId,
           equipmentId: owner.equipmentId, caption: capI.value.trim(), createdAt: new Date().toISOString() });
       }
@@ -1337,7 +1353,7 @@ function openPhotoEditor(owner, existing, newDataUrl, onDone) {
       el('div', { class: 'spacer' }),
       field('Location / note', capI, 'Describe where this is so you can find it later.'),
       existing ? el('button', { class: 'btn danger', onclick: () => {
-        if (confirm('Delete this photo?')) { Store.deletePhoto(existing.id); closeModal(); toast('Photo deleted'); done(); }
+        askConfirm('Delete this photo?', () => { Store.deletePhoto(existing.id); closeModal(); toast('Photo deleted'); done(); }, { title: 'Delete photo', confirmLabel: 'Delete' });
       } }, 'Delete Photo') : null,
     );
   });
@@ -1413,7 +1429,7 @@ function openManualActions(m) {
       el('div', { class: 'stack' },
         el('button', { class: 'btn', onclick: () => openManual(m) }, 'Open Document'),
         el('button', { class: 'btn danger', onclick: () => {
-          if (confirm('Delete this document?')) { Store.deleteManual(m.id); closeModal(); toast('Document deleted'); router(); }
+          askConfirm('Delete this document?', () => { Store.deleteManual(m.id); closeModal(); toast('Document deleted'); router(); }, { title: 'Delete document', confirmLabel: 'Delete' });
         } }, 'Delete Document')));
   });
 }
@@ -1425,19 +1441,23 @@ function addManualFlow(eqId, onDone) {
     const f = input.files && input.files[0];
     input.remove();
     if (!f) return;
-    if (f.size > 25 * 1024 * 1024 &&
-        !confirm(`This file is ${fmtBytes(f.size)} and will make your backups large. Add it anyway?`)) return;
-    toast('Saving document…');
-    const reader = new FileReader();
-    reader.onerror = () => alert('Could not read that file.');
-    reader.onload = async () => {
-      const id = uid();
-      try { await BlobDB.put('file', id, reader.result); }
-      catch (e) { alert('Could not save the document on this device.'); return; }
-      Store.addManual({ id, equipmentId: eqId, name: f.name || 'Document', mime: f.type || '', size: f.size, createdAt: new Date().toISOString() });
-      toast('Document saved'); (onDone || router)();
+    const proceed = () => {
+      toast('Saving document…');
+      const reader = new FileReader();
+      reader.onerror = () => notice('Could not read that file.', 'Read error');
+      reader.onload = async () => {
+        const id = uid();
+        try { await BlobDB.put('file', id, reader.result); }
+        catch (e) { notice('Could not save the document on this device.', 'Save failed'); return; }
+        Store.addManual({ id, equipmentId: eqId, name: f.name || 'Document', mime: f.type || '', size: f.size, createdAt: new Date().toISOString() });
+        toast('Document saved'); (onDone || router)();
+      };
+      reader.readAsDataURL(f);
     };
-    reader.readAsDataURL(f);
+    if (f.size > 25 * 1024 * 1024) {
+      askConfirm(`This file is ${fmtBytes(f.size)} and will make your backups large. Add it anyway?`, proceed,
+        { title: 'Large file', confirmLabel: 'Add anyway', danger: false });
+    } else { proceed(); }
   });
   input.click();
 }
@@ -1446,11 +1466,11 @@ async function openManual(m) {
   toast('Opening…');
   try {
     const data = await BlobDB.get('file', m.id);
-    if (!data) { alert('That file is no longer stored on this device.'); return; }
+    if (!data) { notice('That file is no longer stored on this device.', 'Not found'); return; }
     const url = URL.createObjectURL(dataURLtoBlob(data));
     window.open(url, '_blank');
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } catch (e) { alert('Could not open the file.'); }
+  } catch (e) { notice('Could not open the file.', 'Open failed'); }
 }
 
 /* --------------------------- Service report -------------------------- */
@@ -1540,7 +1560,7 @@ async function shareShoppingList(low, serviceParts) {
     if (navigator.share) { await navigator.share({ title: 'Shopping list', text: txt }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   try { await navigator.clipboard.writeText(txt); toast('List copied'); }
-  catch (e) { alert(txt); }
+  catch (e) { notice(txt, 'Shopping list'); }
 }
 
 /* ------------------------------ Modals ------------------------------- */
@@ -1556,6 +1576,33 @@ function openModal(buildSheet) {
 function closeModal() {
   if (_scanStop) { try { _scanStop(); } catch (e) {} }
   $('#modal').hidden = true; $('#sheet').innerHTML = '';
+}
+
+// In-app confirm dialog (stacks above any open sheet) — replaces native confirm().
+function askConfirm(message, onConfirm, opts = {}) {
+  const { title = 'Are you sure?', confirmLabel = 'Confirm', danger = true } = opts;
+  const overlay = el('div', { class: 'modal', style: 'z-index:400' });
+  const close = () => overlay.remove();
+  overlay.append(el('div', { class: 'sheet confirm-sheet' },
+    el('h3', { class: 'confirm-title' }, title),
+    el('div', { class: 'confirm-msg' }, message),
+    el('div', { class: 'stack', style: 'margin-top:8px' },
+      el('button', { class: danger ? 'btn danger-solid' : 'btn', onclick: () => { close(); onConfirm && onConfirm(); } }, confirmLabel),
+      el('button', { class: 'btn secondary', onclick: close }, 'Cancel'))));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.body.appendChild(overlay);
+}
+
+// In-app message dialog — replaces native alert().
+function notice(message, title = 'Heads up') {
+  const overlay = el('div', { class: 'modal', style: 'z-index:400' });
+  const close = () => overlay.remove();
+  overlay.append(el('div', { class: 'sheet confirm-sheet' },
+    el('h3', { class: 'confirm-title' }, title),
+    el('div', { class: 'confirm-msg' }, message),
+    el('button', { class: 'btn', style: 'margin-top:8px', onclick: close }, 'OK')));
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.body.appendChild(overlay);
 }
 
 function sheetHead(title, onSave, saveLabel = 'Save') {
@@ -1819,7 +1866,7 @@ function openTaskForm(eqId, existing) {
         el('div', { class: 'hint' }, 'Linked parts are pre-checked when you log this service, and listed under it on the Shopping List.')),
       field('Instructions', instrI, 'How to do this job — shown when you view or log the service.'),
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
-        if (confirm('Delete this schedule?')) { Store.deleteTask(task.id); closeModal(); toast('Schedule deleted'); router(); }
+        askConfirm('Delete this schedule?', () => { Store.deleteTask(task.id); closeModal(); toast('Schedule deleted'); router(); }, { title: 'Delete schedule', confirmLabel: 'Delete' });
       } }, 'Delete Schedule') : null,
     );
   });
@@ -1898,7 +1945,7 @@ function openConsumableForm(eqId, existing) {
         el('label', {}, 'Photos'),
         photoManager('consumable', c.id, eqId, () => { closeModal(); openConsumableForm(eqId, Store.getConsumable(c.id)); })) : null,
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
-        if (confirm('Delete this part?')) { Store.deleteConsumable(c.id); closeModal(); toast('Part deleted'); router(); }
+        askConfirm('Delete this part?', () => { Store.deleteConsumable(c.id); closeModal(); toast('Part deleted'); router(); }, { title: 'Delete part', confirmLabel: 'Delete' });
       } }, 'Delete Part') : null,
     );
   });
@@ -2099,7 +2146,7 @@ function openRecordView(r, eq) {
         el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.4' }, r.notes)) : null,
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn danger', onclick: () => {
-        if (confirm('Delete this record?')) { Store.deleteRecord(r.id); closeModal(); toast('Record deleted'); router(); }
+        askConfirm('Delete this record?', () => { Store.deleteRecord(r.id); closeModal(); toast('Record deleted'); router(); }, { title: 'Delete record', confirmLabel: 'Delete' });
       } }, 'Delete Record'),
     );
   });
