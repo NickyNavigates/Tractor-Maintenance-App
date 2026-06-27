@@ -78,6 +78,13 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.
 - **Polished UI** — icon tab bar, equipment photos as avatars, category color accents, swipe a schedule to mark it done or delete, pull-to-refresh, screen transitions, a Settings screen, and a 6-month spend chart on History.
+- **Undo delete** — deleting equipment, a schedule, a part, or a record shows an "Undo" toast for a few seconds.
+- **Quick usage update** — tap a machine's hours/miles stat to bump it (+1/+5/+10/+25) without opening the full edit form.
+- **Duplicate a machine** — clone a unit's details, schedules, and parts to set up an identical machine in one tap.
+- **Upcoming view** — plan-ahead timeline of everything due in the next 90 days, bucketed by Overdue / 30 / 60 / 90 days.
+- **"Whichever comes first" schedules** — a schedule can be due by usage **or** time, whichever hits first (e.g. oil every 100 hrs or 6 months).
+- **Receipts on log entries** — attach a receipt/invoice photo to a maintenance record; included in backups.
+- **Archive machines** — retire a sold machine from the active list (and reminders) without losing its history; restore anytime.
 - **Works offline** — installed as a PWA, it opens and runs with no internet connection.
 
 ---

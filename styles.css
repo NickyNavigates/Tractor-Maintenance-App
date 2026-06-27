@@ -238,7 +238,10 @@ input[type="checkbox"] { -webkit-appearance: checkbox; appearance: checkbox;
 /* Toast */
 .toast { position: fixed; bottom: calc(80px + var(--safe-bottom)); left: 50%; transform: translateX(-50%);
   background: #1c1c1e; color: #fff; padding: 12px 20px; border-radius: 24px; font-size: 14px; font-weight: 600;
-  z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,0.3); animation: pop 0.2s ease; }
+  z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,0.3); animation: pop 0.2s ease;
+  display: flex; align-items: center; gap: 16px; max-width: calc(100vw - 32px); }
+.toast-undo { background: none; border: none; color: #6fd17e; font-weight: 700; font-size: 14px;
+  cursor: pointer; padding: 2px 4px; flex: none; }
 @keyframes pop { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; } }
 
 /* Photos */

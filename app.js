@@ -3,7 +3,7 @@
 
 'use strict';
 
-const APP_VERSION = 'Build 11';
+const APP_VERSION = 'Build 12';
 
 /* ----------------------------- Constants ----------------------------- */
 
@@ -100,10 +100,9 @@ const Store = {
     if (i >= 0) this.data.equipment[i] = eq; else this.data.equipment.push(eq);
     this.save();
   },
+  // Note: delete methods only remove records (not photo/manual blobs). Orphaned
+  // blobs are cleaned up by finalizeOrphans() after the undo window expires.
   deleteEquipment(id) {
-    // remove any stored photo/manual blobs for this equipment (best effort, async)
-    this.data.photos.filter(p => p.equipmentId === id).forEach(p => BlobDB.del('img', p.id).catch(() => {}));
-    this.data.manuals.filter(m => m.equipmentId === id).forEach(m => BlobDB.del('file', m.id).catch(() => {}));
     this.data.equipment   = this.data.equipment.filter(e => e.id !== id);
     this.data.records     = this.data.records.filter(r => r.equipmentId !== id);
     this.data.tasks       = this.data.tasks.filter(t => t.equipmentId !== id);
@@ -123,7 +122,6 @@ const Store = {
     this.save();
   },
   deleteTask(id) {
-    this.data.photos.filter(p => p.ownerType === 'task' && p.ownerId === id).forEach(p => BlobDB.del('img', p.id).catch(() => {}));
     this.data.photos = this.data.photos.filter(p => !(p.ownerType === 'task' && p.ownerId === id));
     this.data.tasks = this.data.tasks.filter(t => t.id !== id);
     this.save();
@@ -136,7 +134,11 @@ const Store = {
       .sort((a, b) => b.date.localeCompare(a.date));
   },
   addRecord(r) { this.data.records.push(r); this.save(); },
-  deleteRecord(id) { this.data.records = this.data.records.filter(r => r.id !== id); this.save(); },
+  deleteRecord(id) {
+    this.data.photos = this.data.photos.filter(p => !(p.ownerType === 'record' && p.ownerId === id));
+    this.data.records = this.data.records.filter(r => r.id !== id);
+    this.save();
+  },
 
   // consumables (required parts/fluids reference per equipment)
   consumablesFor(eqId) { return this.data.consumables.filter(c => c.equipmentId === eqId); },
@@ -147,7 +149,6 @@ const Store = {
     this.save();
   },
   deleteConsumable(id) {
-    this.data.photos.filter(p => p.ownerType === 'consumable' && p.ownerId === id).forEach(p => BlobDB.del('img', p.id).catch(() => {}));
     this.data.photos = this.data.photos.filter(p => !(p.ownerType === 'consumable' && p.ownerId === id));
     this.data.consumables = this.data.consumables.filter(c => c.id !== id);
     this.save();
@@ -338,40 +339,87 @@ function swipeRow(content, actions) {
   return wrap;
 }
 
+/* ----------------------------- Delete + undo ------------------------- */
+
+let _pendingUndo = null;
+
+// Delete blobs that exist in `before` but no longer in `after` (run after undo window).
+function finalizeOrphans(before, after) {
+  const keepImg = new Set(after.photos.map(p => p.id));
+  before.photos.forEach(p => { if (!keepImg.has(p.id)) BlobDB.del('img', p.id).catch(() => {}); });
+  const keepFile = new Set(after.manuals.map(m => m.id));
+  before.manuals.forEach(m => { if (!keepFile.has(m.id)) BlobDB.del('file', m.id).catch(() => {}); });
+}
+
+// Perform a deletion (mutate) but keep it reversible for a few seconds.
+function deleteWithUndo(label, mutate) {
+  const before = JSON.parse(JSON.stringify(Store.data));
+  if (_pendingUndo) _pendingUndo.finalize(); // commit any previous pending delete
+  mutate();
+  Store.save();
+  router();
+  const timer = setTimeout(() => { finalizeOrphans(before, Store.data); _pendingUndo = null; }, 6000);
+  _pendingUndo = {
+    finalize: () => { clearTimeout(timer); finalizeOrphans(before, Store.data); _pendingUndo = null; },
+    undo: () => { clearTimeout(timer); Store.data = before; Store.save(); _pendingUndo = null; toast('Restored'); router(); },
+  };
+  showUndoToast(label, () => _pendingUndo && _pendingUndo.undo());
+}
+
+function showUndoToast(label, onUndo) {
+  const t = $('#toast');
+  t.innerHTML = '';
+  t.append(el('span', {}, label),
+    el('button', { class: 'toast-undo', onclick: () => { t.hidden = true; onUndo(); } }, 'Undo'));
+  t.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.hidden = true; }, 6000);
+}
+
+/* ------------------------------ Archive ------------------------------ */
+function isArchived(eqId) { const e = Store.getEquipment(eqId); return !!(e && e.archived); }
+function activeEquipment() { return Store.equipment().filter(e => !e.archived); }
+// Tasks that should drive dashboards/reminders (exclude archived machines).
+function activeTasks() { return Store.tasks().filter(t => !isArchived(t.equipmentId)); }
+
 /* --------------------------- Task scheduling -------------------------- */
 
 // Returns { status: 'ok'|'soon'|'over', text: string, sort: number }
 // sort is a urgency key (lower = more urgent) so lists order naturally.
+const _rank = (s) => (s === 'over' ? 2 : s === 'soon' ? 1 : 0);
+
+function usageStatusOf(task, eq, usageInterval) {
+  const unit = UNIT_LABEL[eq?.usageUnit] || 'units';
+  const dueAt = (task.lastDoneUsage ?? 0) + Number(usageInterval);
+  const left = dueAt - Number(eq?.currentUsage ?? 0);
+  const soonWindow = (task.leadUsage !== '' && task.leadUsage != null)
+    ? Number(task.leadUsage) : Number(usageInterval) * SOON_USAGE_FRACTION;
+  const status = left <= 0 ? 'over' : (left <= soonWindow ? 'soon' : 'ok');
+  const text = left <= 0 ? `Over by ${fmtNum(-left)} ${unit}` : `In ${fmtNum(left)} ${unit}`;
+  return { status, text, sort: left, due: `at ${fmtNum(dueAt)} ${unit}`, frac: Number(usageInterval) ? left / Number(usageInterval) : left };
+}
+
+function timeStatusOf(task, daysInterval) {
+  const last = task.lastDoneDate || todayISO();
+  const nextDays = daysBetween(todayISO(), addDays(last, Number(daysInterval)));
+  const soonDays = (task.leadDays !== '' && task.leadDays != null) ? Number(task.leadDays) : SOON_DAYS;
+  const status = nextDays < 0 ? 'over' : (nextDays <= soonDays ? 'soon' : 'ok');
+  const text = nextDays < 0 ? `Overdue ${Math.abs(nextDays)}d` : nextDays === 0 ? 'Due today' : `In ${nextDays} days`;
+  return { status, text, sort: nextDays, due: fmtDate(addDays(last, Number(daysInterval))), frac: Number(daysInterval) ? nextDays / Number(daysInterval) : nextDays, days: nextDays };
+}
+
 function taskStatus(task) {
   const eq = Store.getEquipment(task.equipmentId);
-  if (task.intervalType === 'usage') {
-    const unit = UNIT_LABEL[eq?.usageUnit] || 'units';
-    const base = task.lastDoneUsage ?? 0;
-    const dueAt = base + Number(task.intervalValue);
-    const current = Number(eq?.currentUsage ?? 0);
-    const left = dueAt - current;
-    // "soon" window = the task's lead amount if set, else a fraction of the interval
-    const soonWindow = (task.leadUsage !== '' && task.leadUsage != null)
-      ? Number(task.leadUsage) : Number(task.intervalValue) * SOON_USAGE_FRACTION;
-    let status = 'ok';
-    if (left <= 0) status = 'over';
-    else if (left <= soonWindow) status = 'soon';
-    const text = left <= 0
-      ? `Over by ${fmtNum(-left)} ${unit}`
-      : `In ${fmtNum(left)} ${unit}`;
-    return { status, text, sort: left, due: `at ${fmtNum(dueAt)} ${unit}` };
-  } else {
-    const last = task.lastDoneDate || todayISO();
-    const nextDays = daysBetween(todayISO(), addDays(last, Number(task.intervalValue)));
-    const soonDays = (task.leadDays !== '' && task.leadDays != null) ? Number(task.leadDays) : SOON_DAYS;
-    let status = 'ok';
-    if (nextDays < 0) status = 'over';
-    else if (nextDays <= soonDays) status = 'soon';
-    const text = nextDays < 0
-      ? `Overdue ${Math.abs(nextDays)}d`
-      : nextDays === 0 ? 'Due today' : `In ${nextDays} days`;
-    return { status, text, sort: nextDays, due: fmtDate(addDays(last, Number(task.intervalValue))) };
+  if (task.intervalType === 'both') {
+    const u = usageStatusOf(task, eq, task.intervalValue);
+    const d = timeStatusOf(task, task.intervalDays);
+    const status = _rank(u.status) >= _rank(d.status) ? u.status : d.status;
+    // for display, pick the more urgent (higher rank, then nearer fraction)
+    const chosen = _rank(u.status) !== _rank(d.status) ? (_rank(u.status) > _rank(d.status) ? u : d) : (u.frac <= d.frac ? u : d);
+    return { status, text: chosen.text, sort: Math.min(u.sort, d.sort), due: chosen.due };
   }
+  if (task.intervalType === 'usage') return usageStatusOf(task, eq, task.intervalValue);
+  return timeStatusOf(task, task.intervalValue);
 }
 
 function addDays(iso, n) {
@@ -381,7 +429,7 @@ function addDays(iso, n) {
 }
 
 function allTasksRanked() {
-  return Store.tasks()
+  return activeTasks()
     .map(t => ({ task: t, st: taskStatus(t), eq: Store.getEquipment(t.equipmentId) }))
     .filter(x => x.eq)
     .sort((a, b) => a.st.sort - b.st.sort);
@@ -389,9 +437,9 @@ function allTasksRanked() {
 
 /* ----------------------------- Reminders ----------------------------- */
 
-function overdueCount() { return Store.tasks().filter(t => taskStatus(t).status === 'over').length; }
+function overdueCount() { return activeTasks().filter(t => taskStatus(t).status === 'over').length; }
 // Items needing attention = overdue + due-soon (honors each task's lead time).
-function attentionCount() { return Store.tasks().filter(t => taskStatus(t).status !== 'ok').length; }
+function attentionCount() { return activeTasks().filter(t => taskStatus(t).status !== 'ok').length; }
 
 // Put a count of items needing attention on the installed app's home-screen icon.
 function updateBadge() {
@@ -541,6 +589,8 @@ function router() {
     render = renderAllParts; title = 'All Parts'; showBack = true;
   } else if (path === '/shopping') {
     render = renderShopping; title = 'Shopping List'; showAdd = false;
+  } else if (path === '/upcoming') {
+    render = renderUpcoming; title = 'Upcoming'; showBack = true; showAdd = false;
   } else if (path === '/history') {
     render = renderHistory; title = 'History'; showAdd = false;
   } else if (path === '/settings') {
@@ -637,7 +687,7 @@ function renderDashboard(view) {
   const ytd = Store.records().filter(r => (r.date || '').slice(0, 4) === todayISO().slice(0, 4))
     .reduce((s, r) => s + (Number(r.cost) || 0), 0);
   view.appendChild(el('div', { class: 'usage-box', style: 'margin-top:12px' },
-    el('div', { class: 'stat' }, el('div', { class: 'sval' }, String(eqs.length)), el('div', { class: 'slabel' }, 'Machines')),
+    el('div', { class: 'stat' }, el('div', { class: 'sval' }, String(activeEquipment().length)), el('div', { class: 'slabel' }, 'Machines')),
     el('div', { class: 'stat' }, el('div', { class: 'sval' }, String(ranked.filter(x => x.st.status !== 'ok').length)), el('div', { class: 'slabel' }, 'Due')),
     el('div', { class: 'stat' }, el('div', { class: 'sval', style: 'font-size:18px' }, ytd > 0 ? fmtMoney(ytd) : '—'), el('div', { class: 'slabel' }, 'Spent ' + todayISO().slice(0, 4)))));
 
@@ -653,10 +703,20 @@ function renderDashboard(view) {
     view.appendChild(card);
   }
 
-  // Equipment quick summary
+  // Plan-ahead link
+  view.appendChild(el('div', { class: 'spacer' }));
+  view.appendChild(el('div', { class: 'card' },
+    el('div', { class: 'row', onclick: () => navigate('#/upcoming') },
+      el('span', { class: 'emoji' }, '📅'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'Upcoming maintenance'),
+        el('div', { class: 'secondary' }, 'Plan the next 90 days')),
+      el('span', { class: 'chev' }, '›'))));
+
+  // Equipment quick summary (active machines)
   view.appendChild(el('div', { class: 'section-title' }, 'Equipment'));
   const eqCard = el('div', { class: 'card' });
-  eqs.forEach(eq => eqCard.appendChild(equipmentRow(eq)));
+  activeEquipment().forEach(eq => eqCard.appendChild(equipmentRow(eq)));
   view.appendChild(eqCard);
 
   // Settings entry
@@ -865,7 +925,7 @@ function taskRow(x, showEquip) {
     statusPill(st));
   return swipeRow(row, [
     { label: 'Done', cls: 'done', onClick: () => markTaskDone(task) },
-    { label: 'Delete', cls: 'del', onClick: () => askConfirm('Delete this schedule?', () => { Store.deleteTask(task.id); toast('Schedule deleted'); router(); }, { title: 'Delete schedule', confirmLabel: 'Delete' }) },
+    { label: 'Delete', cls: 'del', onClick: () => askConfirm('Delete this schedule?', () => deleteWithUndo('Schedule deleted', () => Store.deleteTask(task.id)), { title: 'Delete schedule', confirmLabel: 'Delete' }) },
   ]);
 }
 
@@ -914,8 +974,9 @@ function renderEquipmentList(view) {
   const renderBody = (q) => {
     results.innerHTML = '';
     if (q) { renderSearchResults(results, q); return; }
+    const active = eqs.filter(e => !e.archived);
     CATEGORY_ORDER.forEach(cat => {
-      const inCat = eqs.filter(e => e.category === cat);
+      const inCat = active.filter(e => e.category === cat);
       if (!inCat.length) return;
       results.appendChild(el('div', { class: 'section-title' },
         `${CATEGORIES[cat].emoji} ${CATEGORIES[cat].label}s`));
@@ -931,6 +992,19 @@ function renderEquipmentList(view) {
           el('div', { class: 'primary' }, 'All Parts'),
           el('div', { class: 'secondary' }, `${Store.data.consumables.length} part(s) across all equipment`)),
         el('span', { class: 'chev' }, '›'))));
+    // Archived machines
+    const archived = eqs.filter(e => e.archived);
+    if (archived.length) {
+      results.appendChild(el('div', { class: 'section-title' }, 'Archived'));
+      const card = el('div', { class: 'card' });
+      archived.forEach(eq => card.appendChild(el('div', { class: 'row', style: 'opacity:0.65', onclick: () => navigate('#/equipment/' + encodeURIComponent(eq.id)) },
+        el('span', { class: 'emoji' }, CATEGORIES[eq.category].emoji),
+        el('div', { class: 'grow' },
+          el('div', { class: 'primary' }, eq.name),
+          el('div', { class: 'secondary' }, 'Archived · tap to view or restore')),
+        el('span', { class: 'chev' }, '›'))));
+      results.appendChild(card);
+    }
   };
 
   searchI.addEventListener('input', () => renderBody(searchI.value.trim().toLowerCase()));
@@ -1051,9 +1125,9 @@ function renderEquipmentDetail(view, id) {
   const records = Store.recordsFor(eq.id);
   const stats = el('div', { class: 'usage-box' });
   if (eq.usageUnit !== 'none') {
-    stats.appendChild(el('div', { class: 'stat' },
+    stats.appendChild(el('div', { class: 'stat', style: 'cursor:pointer', onclick: () => openUsageUpdate(eq) },
       el('div', { class: 'sval' }, fmtNum(eq.currentUsage || 0)),
-      el('div', { class: 'slabel' }, unit)));
+      el('div', { class: 'slabel' }, unit + ' ✎')));
   }
   stats.appendChild(el('div', { class: 'stat' },
     el('div', { class: 'sval' }, String(Store.tasksFor(eq.id).length)),
@@ -1100,7 +1174,7 @@ function renderEquipmentDetail(view, id) {
         statusPill(st));
       card.appendChild(swipeRow(row, [
         { label: 'Done', cls: 'done', onClick: () => markTaskDone(task) },
-        { label: 'Delete', cls: 'del', onClick: () => askConfirm('Delete this schedule?', () => { Store.deleteTask(task.id); toast('Schedule deleted'); router(); }, { title: 'Delete schedule', confirmLabel: 'Delete' }) },
+        { label: 'Delete', cls: 'del', onClick: () => askConfirm('Delete this schedule?', () => deleteWithUndo('Schedule deleted', () => Store.deleteTask(task.id)), { title: 'Delete schedule', confirmLabel: 'Delete' }) },
       ]));
     });
     view.appendChild(card);
@@ -1131,13 +1205,17 @@ function renderEquipmentDetail(view, id) {
   view.appendChild(el('div', { class: 'stack' },
     el('button', { class: 'btn secondary', onclick: () => printServiceReport(eq) }, '🖨️ Service Report (PDF)'),
     el('button', { class: 'btn secondary', onclick: () => openEquipmentForm(eq) }, 'Edit Details'),
+    el('button', { class: 'btn secondary', onclick: () => duplicateEquipment(eq) }, '⧉ Duplicate Machine'),
+    el('button', { class: 'btn secondary', onclick: () => {
+      eq.archived = !eq.archived; Store.upsertEquipment(eq);
+      toast(eq.archived ? 'Archived' : 'Restored'); router();
+    } }, eq.archived ? '↩︎ Restore (Unarchive)' : '📦 Archive Machine'),
     el('button', {
       class: 'btn danger',
       onclick: () => {
-        askConfirm(`Delete "${eq.name}" and everything logged for it? This can't be undone.`, () => {
-          Store.deleteEquipment(eq.id);
-          toast('Equipment deleted');
+        askConfirm(`Delete "${eq.name}" and everything logged for it?`, () => {
           navigate('#/equipment');
+          deleteWithUndo('Equipment deleted', () => Store.deleteEquipment(eq.id));
         }, { title: 'Delete equipment', confirmLabel: 'Delete' });
       }
     }, 'Delete Equipment')));
@@ -1145,17 +1223,60 @@ function renderEquipmentDetail(view, id) {
   return { title: eq.name };
 }
 
+// Quick update of a machine's current hours/miles.
+function openUsageUpdate(eq) {
+  const unit = UNIT_LABEL[eq.usageUnit];
+  openModal((sheet) => {
+    const n = el('input', { type: 'number', value: eq.currentUsage || 0, inputmode: 'decimal', step: 'any' });
+    const bump = (d) => { n.value = String((Number(n.value) || 0) + d); };
+    const save = () => {
+      eq.currentUsage = n.value === '' ? 0 : Number(n.value);
+      Store.upsertEquipment(eq);
+      closeModal(); toast('Usage updated'); router();
+    };
+    sheet.append(
+      sheetHead(`Update ${unit}`, save),
+      el('div', { class: 'muted', style: 'margin:0 4px 12px' }, eq.name),
+      field(`Current ${unit}`, n),
+      el('div', { class: 'seg' },
+        el('button', { onclick: () => bump(1) }, '+1'),
+        el('button', { onclick: () => bump(5) }, '+5'),
+        el('button', { onclick: () => bump(10) }, '+10'),
+        el('button', { onclick: () => bump(25) }, '+25')));
+  });
+}
+
+// Clone a machine's setup (details + schedules + parts) to a new unit.
+function duplicateEquipment(eq) {
+  const newId = uid();
+  Store.upsertEquipment({ ...eq, id: newId, name: (eq.name + ' (copy)').slice(0, 80), archived: false });
+  const idMap = {};
+  Store.consumablesFor(eq.id).forEach(c => {
+    const nc = { ...c, id: uid(), equipmentId: newId, onHand: '' }; // fresh stock for the new unit
+    idMap[c.id] = nc.id;
+    Store.upsertConsumable(nc);
+  });
+  Store.tasksFor(eq.id).forEach(t => {
+    Store.upsertTask({
+      ...t, id: uid(), equipmentId: newId,
+      lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0,
+      partIds: (t.partIds || []).map(pid => idMap[pid]).filter(Boolean),
+    });
+  });
+  toast('Machine duplicated');
+  navigate('#/equipment/' + encodeURIComponent(newId));
+}
+
 function intervalText(task) {
   const eq = Store.getEquipment(task.equipmentId);
+  const unit = UNIT_LABEL[eq?.usageUnit] || 'units';
+  if (task.intervalType === 'both') {
+    return `Every ${fmtNum(task.intervalValue)} ${unit} or ${daysLabel(task.intervalDays).replace('Every ', '')}`;
+  }
   if (task.intervalType === 'usage') {
-    const unit = UNIT_LABEL[eq?.usageUnit] || 'units';
     return `Every ${fmtNum(task.intervalValue)} ${unit}`;
   }
-  const v = Number(task.intervalValue);
-  if (v % 365 === 0 && v >= 365) return `Every ${v / 365} year${v / 365 > 1 ? 's' : ''}`;
-  if (v % 30 === 0 && v >= 30) return `Every ${v / 30} month${v / 30 > 1 ? 's' : ''}`;
-  if (v % 7 === 0 && v >= 7) return `Every ${v / 7} week${v / 7 > 1 ? 's' : ''}`;
-  return `Every ${v} days`;
+  return daysLabel(task.intervalValue);
 }
 
 function recordRow(r, eq) {
@@ -1213,7 +1334,7 @@ function isLowStock(c) {
   const reorder = (c.reorderAt === '' || c.reorderAt == null) ? 0 : Number(c.reorderAt);
   return Number(c.onHand) <= reorder;
 }
-function lowStockConsumables() { return Store.data.consumables.filter(isLowStock); }
+function lowStockConsumables() { return Store.data.consumables.filter(c => !isArchived(c.equipmentId) && isLowStock(c)); }
 
 function fmtMoneyShort(n) {
   n = Number(n);
@@ -1243,6 +1364,39 @@ function spendChart(all) {
       el('div', { class: 'chart-lbl' }, m.label)));
   });
   return el('div', { class: 'card chart-card' }, chart);
+}
+
+// Plan-ahead view: what's due over the next 90 days, in buckets.
+function renderUpcoming(view) {
+  const tasks = activeTasks().map(t => ({ task: t, st: taskStatus(t), eq: Store.getEquipment(t.equipmentId) })).filter(x => x.eq);
+  if (!tasks.length) {
+    emptyState(view, '📅', 'Nothing scheduled', 'Add service schedules to your equipment and they’ll show up here as a plan.', null);
+    return { title: 'Upcoming' };
+  }
+  const daysUntil = (t) => {
+    if (t.intervalType === 'days') return timeStatusOf(t, t.intervalValue).days;
+    if (t.intervalType === 'both') return timeStatusOf(t, t.intervalDays).days;
+    return null; // usage-only — no calendar date
+  };
+  const rest = tasks.filter(x => x.st.status !== 'over');
+  const buckets = [
+    { title: 'Overdue', items: tasks.filter(x => x.st.status === 'over') },
+    { title: 'Next 30 days', items: rest.filter(x => { const d = daysUntil(x.task); return d != null && d >= 0 && d <= 30; }) },
+    { title: '31–60 days', items: rest.filter(x => { const d = daysUntil(x.task); return d != null && d > 30 && d <= 60; }) },
+    { title: '61–90 days', items: rest.filter(x => { const d = daysUntil(x.task); return d != null && d > 60 && d <= 90; }) },
+    { title: 'Watch (by usage)', items: rest.filter(x => daysUntil(x.task) == null && x.st.status === 'soon') },
+  ];
+  let any = false;
+  buckets.forEach(b => {
+    if (!b.items.length) return;
+    any = true;
+    view.appendChild(el('div', { class: 'section-title' }, `${b.title} · ${b.items.length}`));
+    const card = el('div', { class: 'card' });
+    b.items.sort((a, b2) => a.st.sort - b2.st.sort).forEach(x => card.appendChild(taskRow(x, true)));
+    view.appendChild(card);
+  });
+  if (!any) emptyState(view, '✅', 'Nothing due in 90 days', 'You’re all set for the next three months.', null);
+  return { title: 'Upcoming' };
 }
 
 function renderHistory(view) {
@@ -1292,7 +1446,7 @@ function renderHistory(view) {
 /* Equipment ids that currently have a due-soon or overdue schedule. */
 function equipmentWithDueService() {
   const ids = new Set();
-  Store.tasks().forEach(t => { if (taskStatus(t).status !== 'ok') ids.add(t.equipmentId); });
+  activeTasks().forEach(t => { if (taskStatus(t).status !== 'ok') ids.add(t.equipmentId); });
   return ids;
 }
 
@@ -1307,7 +1461,7 @@ function renderShopping(view) {
   const low = lowStockConsumables();
   const lowIds = new Set(low.map(c => c.id));
   // Parts needed for upcoming service = parts LINKED to due/overdue schedules (precise).
-  const dueTasks = Store.tasks().filter(t => taskStatus(t).status !== 'ok');
+  const dueTasks = activeTasks().filter(t => taskStatus(t).status !== 'ok');
   const serviceIds = new Set();
   dueTasks.forEach(t => (t.partIds || []).forEach(id => { if (!lowIds.has(id)) serviceIds.add(id); }));
   const serviceParts = [...serviceIds].map(id => Store.getConsumable(id)).filter(Boolean);
@@ -1891,7 +2045,7 @@ function openTaskForm(eqId, existing) {
   const task = existing || {
     id: uid(), equipmentId: eqId, title: '',
     intervalType: eq.usageUnit === 'none' ? 'days' : 'usage',
-    intervalValue: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0, partIds: [], instructions: '',
+    intervalValue: '', intervalDays: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0, partIds: [], instructions: '',
     leadDays: '', leadUsage: '',
   };
   let intervalType = task.intervalType;
@@ -1900,63 +2054,58 @@ function openTaskForm(eqId, existing) {
   openModal((sheet) => {
     const titleI = el('input', { type: 'text', value: task.title, placeholder: 'e.g. Engine oil & filter' });
     const instrI = el('textarea', { placeholder: 'Step-by-step how-to, torque specs, fill amounts, tips…', style: 'min-height:110px' }, task.instructions || '');
-    const valueI = el('input', { type: 'number', value: task.intervalValue, placeholder: '0', inputmode: 'decimal', step: 'any' });
-    const leadI = el('input', { type: 'number', value: (intervalType === 'usage' ? task.leadUsage : task.leadDays) ?? '', placeholder: '0', inputmode: 'decimal', step: 'any' });
+    const unit = UNIT_LABEL[eq.usageUnit];
+    const canUsage = eq.usageUnit !== 'none';
+    const usageI = el('input', { type: 'number', value: (task.intervalType === 'usage' || task.intervalType === 'both') ? task.intervalValue : '', placeholder: 'e.g. 100', inputmode: 'decimal', step: 'any' });
+    const daysI = el('input', { type: 'number', value: task.intervalType === 'days' ? task.intervalValue : (task.intervalType === 'both' ? (task.intervalDays ?? '') : ''), placeholder: 'e.g. 90', inputmode: 'decimal', step: 'any' });
+    const leadI = el('input', { type: 'number', value: (intervalType === 'usage' ? task.leadUsage : intervalType === 'days' ? task.leadDays : '') ?? '', placeholder: 'e.g. 7', inputmode: 'decimal', step: 'any' });
     const lastDateI = el('input', { type: 'date', value: task.lastDoneDate || todayISO() });
     const lastUsageI = el('input', { type: 'number', value: task.lastDoneUsage ?? '', placeholder: '0', inputmode: 'decimal', step: 'any' });
 
-    const unit = UNIT_LABEL[eq.usageUnit];
-    const canUsage = eq.usageUnit !== 'none';
-
-    const valueField = field('', valueI);
-    const leadField = field('', leadI, 'Flag it as “due soon” this far ahead. Leave blank for the default.');
-    const updateValueLabel = () => {
-      valueField.querySelector('label').textContent = intervalType === 'usage'
-        ? `Interval (${unit})` : 'Interval (days)';
-      valueI.placeholder = intervalType === 'usage' ? `e.g. 100` : `e.g. 90`;
-      leadField.querySelector('label').textContent = intervalType === 'usage'
-        ? `Remind me ahead (${unit})` : 'Remind me ahead (days)';
-      leadI.placeholder = intervalType === 'usage' ? 'e.g. 20' : 'e.g. 7';
-    };
-
-    const lastUsageField = field(`Last done at (${unit})`, lastUsageI,
-      'Used to calculate when the next service is due.');
+    const usageField = field(`Interval (${unit || 'usage'})`, usageI);
+    const daysField = field('Interval (days)', daysI);
+    const leadField = field('Remind me ahead', leadI, 'Flag it “due soon” this far ahead. Blank = default.');
+    const lastUsageField = field(`Last done at (${unit})`, lastUsageI, 'Used to calculate when the next service is due.');
     const lastDateField = field('Last done on', lastDateI);
 
     const updateMode = () => {
-      lastUsageField.style.display = intervalType === 'usage' ? '' : 'none';
-      updateValueLabel();
+      const showUsage = intervalType === 'usage' || intervalType === 'both';
+      const showDays = intervalType === 'days' || intervalType === 'both';
+      usageField.style.display = showUsage ? '' : 'none';
+      daysField.style.display = showDays ? '' : 'none';
+      lastUsageField.style.display = showUsage ? '' : 'none';
+      leadField.style.display = intervalType === 'both' ? 'none' : '';
+      leadField.querySelector('label').textContent = intervalType === 'usage' ? `Remind me ahead (${unit})` : 'Remind me ahead (days)';
+      leadI.placeholder = intervalType === 'usage' ? 'e.g. 20' : 'e.g. 7';
     };
 
-    const typeSeg = el('div', { class: 'seg' },
-      el('button', { class: intervalType === 'usage' ? 'on' : '', disabled: !canUsage, onclick: () => {
-        if (!canUsage) return; intervalType = 'usage';
-        typeSeg.children[0].classList.add('on'); typeSeg.children[1].classList.remove('on'); updateMode();
-      } }, `By ${unit || 'usage'}`),
-      el('button', { class: intervalType === 'days' ? 'on' : '', onclick: () => {
-        intervalType = 'days';
-        typeSeg.children[1].classList.add('on'); typeSeg.children[0].classList.remove('on'); updateMode();
-      } }, 'By time'));
-
+    const typeSeg = el('div', { class: 'seg' });
+    const segBtn = (mode, label, disabled) => el('button', { class: intervalType === mode ? 'on' : '', disabled: !!disabled, 'data-mode': mode, onclick: () => {
+      if (disabled) return; intervalType = mode;
+      [...typeSeg.children].forEach(b => b.classList.toggle('on', b.getAttribute('data-mode') === mode));
+      updateMode();
+    } }, label);
+    typeSeg.append(segBtn('usage', `By ${unit || 'usage'}`, !canUsage), segBtn('days', 'By time', false), segBtn('both', 'Both', !canUsage));
     updateMode();
 
     const save = () => {
       if (!titleI.value.trim()) { toast('Enter a task name'); titleI.focus(); return; }
-      if (!valueI.value || Number(valueI.value) <= 0) { toast('Enter an interval'); valueI.focus(); return; }
+      const uVal = Number(usageI.value), dVal = Number(daysI.value);
+      if ((intervalType === 'usage' || intervalType === 'both') && !(uVal > 0)) { toast(`Enter a ${unit} interval`); usageI.focus(); return; }
+      if ((intervalType === 'days' || intervalType === 'both') && !(dVal > 0)) { toast('Enter a day interval'); daysI.focus(); return; }
       const leadVal = leadI.value === '' ? '' : Number(leadI.value);
-      Store.upsertTask({
-        id: task.id,
-        equipmentId: eqId,
-        title: titleI.value.trim(),
-        intervalType,
-        intervalValue: Number(valueI.value),
+      const t = {
+        id: task.id, equipmentId: eqId, title: titleI.value.trim(), intervalType,
         lastDoneDate: lastDateI.value || todayISO(),
-        lastDoneUsage: intervalType === 'usage' ? Number(lastUsageI.value || 0) : (task.lastDoneUsage ?? 0),
-        leadDays: intervalType === 'days' ? leadVal : (task.leadDays ?? ''),
-        leadUsage: intervalType === 'usage' ? leadVal : (task.leadUsage ?? ''),
+        lastDoneUsage: (intervalType === 'usage' || intervalType === 'both') ? Number(lastUsageI.value || 0) : (task.lastDoneUsage ?? 0),
+        leadDays: intervalType === 'days' ? leadVal : '',
+        leadUsage: intervalType === 'usage' ? leadVal : '',
         partIds: parts.getSelected(),
         instructions: instrI.value.trim(),
-      });
+      };
+      if (intervalType === 'both') { t.intervalValue = uVal; t.intervalDays = dVal; }
+      else t.intervalValue = intervalType === 'usage' ? uVal : dVal;
+      Store.upsertTask(t);
       closeModal();
       toast(isEdit ? 'Schedule saved' : 'Schedule added');
       router();
@@ -1965,18 +2114,19 @@ function openTaskForm(eqId, existing) {
     sheet.append(
       sheetHead(isEdit ? 'Edit Schedule' : 'New Service Schedule', save),
       field('Task', titleI, 'e.g. Oil change, grease fittings, air filter'),
-      field('Repeat', typeSeg, canUsage ? null : 'This item has no usage meter, so schedules are time-based.'),
-      valueField,
+      field('Repeat', typeSeg, canUsage ? '“Both” = due by hours/miles OR time, whichever comes first.' : 'This item has no usage meter, so schedules are time-based.'),
+      usageField,
+      daysField,
       leadField,
       lastDateField,
-      canUsage ? lastUsageField : null,
+      lastUsageField,
       el('div', { class: 'field' },
         el('label', {}, 'Parts this service needs'),
         parts.node,
         el('div', { class: 'hint' }, 'Linked parts are pre-checked when you log this service, and listed under it on the Shopping List.')),
       field('Instructions', instrI, 'How to do this job — shown when you view or log the service.'),
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
-        askConfirm('Delete this schedule?', () => { Store.deleteTask(task.id); closeModal(); toast('Schedule deleted'); router(); }, { title: 'Delete schedule', confirmLabel: 'Delete' });
+        askConfirm('Delete this schedule?', () => { closeModal(); deleteWithUndo('Schedule deleted', () => Store.deleteTask(task.id)); }, { title: 'Delete schedule', confirmLabel: 'Delete' });
       } }, 'Delete Schedule') : null,
     );
   });
@@ -2055,7 +2205,7 @@ function openConsumableForm(eqId, existing) {
         el('label', {}, 'Photos'),
         photoManager('consumable', c.id, eqId, () => { closeModal(); openConsumableForm(eqId, Store.getConsumable(c.id)); })) : null,
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
-        askConfirm('Delete this part?', () => { Store.deleteConsumable(c.id); closeModal(); toast('Part deleted'); router(); }, { title: 'Delete part', confirmLabel: 'Delete' });
+        askConfirm('Delete this part?', () => { closeModal(); deleteWithUndo('Part deleted', () => Store.deleteConsumable(c.id)); }, { title: 'Delete part', confirmLabel: 'Delete' });
       } }, 'Delete Part') : null,
     );
   });
@@ -2156,7 +2306,33 @@ function openRecordForm(eqId, opts = {}) {
     schedSelect.addEventListener('change', () => { selectedTaskId = schedSelect.value; applyTask(selectedTaskId); });
     if (selectedTaskId) applyTask(selectedTaskId);
 
-    const save = () => {
+    // Optional receipt photo (stored with the record on save).
+    let pendingReceipt = null;
+    const receiptBox = el('div', {});
+    const pickReceipt = () => {
+      const input = el('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none' });
+      document.body.appendChild(input);
+      input.addEventListener('change', async () => {
+        const f = input.files && input.files[0]; input.remove(); if (!f) return;
+        try { pendingReceipt = await fileToCompressedDataURL(f, 1400, 0.7); renderReceipt(); }
+        catch (e) { notice('Could not read that image.', 'Read error'); }
+      });
+      input.click();
+    };
+    const renderReceipt = () => {
+      receiptBox.innerHTML = '';
+      if (pendingReceipt) {
+        receiptBox.append(el('div', { class: 'row', style: 'cursor:default;gap:10px' },
+          el('img', { class: 'mini-thumb', src: pendingReceipt }),
+          el('div', { class: 'grow' }, el('div', { class: 'secondary' }, 'Receipt attached')),
+          el('button', { class: 'btn small secondary', style: 'width:auto', onclick: () => { pendingReceipt = null; renderReceipt(); } }, 'Remove')));
+      } else {
+        receiptBox.append(el('button', { class: 'btn small secondary', style: 'width:auto', onclick: pickReceipt }, '📄 Add receipt photo'));
+      }
+    };
+    renderReceipt();
+
+    const save = async () => {
       if (!titleI.value.trim()) { toast('Enter what was done'); titleI.focus(); return; }
       const partsUsed = [];
       partControls.forEach(pc => {
@@ -2177,6 +2353,14 @@ function openRecordForm(eqId, opts = {}) {
       if (partsUsed.length) rec.partsUsed = partsUsed;
       if (selectedTaskId) rec.taskId = selectedTaskId;
       Store.addRecord(rec);
+      // attach receipt photo if one was added
+      if (pendingReceipt) {
+        const pid = uid();
+        try {
+          await BlobDB.put('img', pid, pendingReceipt);
+          Store.addPhoto({ id: pid, ownerType: 'record', ownerId: rec.id, equipmentId: eqId, caption: 'Receipt', createdAt: new Date().toISOString() });
+        } catch (e) { /* ignore */ }
+      }
       // deduct used parts from on-hand stock
       partsUsed.forEach(pu => {
         const c = Store.getConsumable(pu.consumableId);
@@ -2190,7 +2374,7 @@ function openRecordForm(eqId, opts = {}) {
         const t = Store.getTask(selectedTaskId);
         if (t) {
           t.lastDoneDate = rec.date;
-          if (t.intervalType === 'usage') t.lastDoneUsage = Number(rec.usageAtService || eq.currentUsage || 0);
+          if (t.intervalType === 'usage' || t.intervalType === 'both') t.lastDoneUsage = Number(rec.usageAtService || eq.currentUsage || 0);
           Store.upsertTask(t);
         }
       }
@@ -2223,6 +2407,7 @@ function openRecordForm(eqId, opts = {}) {
         el('label', {}, 'Parts used (deducts from stock)'),
         el('div', { class: 'card' }, ...partControls.map(pc => pc.row))) : null,
       field('Cost', costI, 'Optional — parts + labor'),
+      field('Receipt', receiptBox),
       field('Notes', notesI),
     );
   });
@@ -2254,12 +2439,23 @@ function openRecordView(r, eq) {
       r.notes ? el('div', { class: 'field', style: 'margin-top:14px' },
         el('label', {}, 'Notes'),
         el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.4' }, r.notes)) : null,
+      receiptSection(r),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn danger', onclick: () => {
-        askConfirm('Delete this record?', () => { Store.deleteRecord(r.id); closeModal(); toast('Record deleted'); router(); }, { title: 'Delete record', confirmLabel: 'Delete' });
+        askConfirm('Delete this record?', () => { closeModal(); deleteWithUndo('Record deleted', () => Store.deleteRecord(r.id)); }, { title: 'Delete record', confirmLabel: 'Delete' });
       } }, 'Delete Record'),
     );
   });
+}
+
+// Receipt thumbnail for a record, if one is attached.
+function receiptSection(r) {
+  const photos = Store.photosFor('record', r.id);
+  if (!photos.length) return null;
+  const p = photos[0];
+  return el('div', { class: 'field', style: 'margin-top:14px' },
+    el('label', {}, 'Receipt'),
+    el('div', { class: 'photo-grid' }, photoThumb(p, () => { closeModal(); openRecordView(r, Store.getEquipment(r.equipmentId)); })));
 }
 
 /* ---- Add button (context-aware) ---- */
