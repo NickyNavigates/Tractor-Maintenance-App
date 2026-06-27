@@ -60,7 +60,11 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Consumables & parts reference** — per machine, keep a list of the oils, greases, fluids, filters, belts, tires, batteries, plugs, blades, and other parts it needs, with the spec/grade, part number, and quantity/capacity. So when it's time to service, you know exactly what to buy.
 - **Stock tracking** — give any part an *on-hand* count and a *reorder-at* level. Parts at or below their threshold (or at zero) are flagged.
 - **Parts used when logging** — logging maintenance lets you tick off which saved parts you used; those quantities are automatically deducted from on-hand stock and recorded on the entry.
-- **Shopping List** — a dedicated tab that gathers what to buy: anything low/out of stock, plus the parts for any machine with service due. Share or copy the list to take to the store. A red dot on the tab warns when something's low.
+- **Shopping List** — a dedicated tab that gathers what to buy: anything low/out of stock, plus the parts linked to any machine with service due. Shows an estimated total from part costs, a one-tap **Restock** button, and Share/Copy to take to the store. A red dot on the tab warns when something's low.
+- **Parts linked to schedules** — attach specific parts to a service schedule. When you log that service, the schedule prefills the entry and its parts are pre-checked; the Shopping List then lists exactly those parts when it's due.
+- **Log against a schedule** — when logging maintenance, pick one of the machine's schedules to prefill the work, auto-select its parts, and reset its countdown in one step.
+- **Part costs** — give a part a unit cost to see estimated shopping totals.
+- **Photos & locations** — snap and store reference photos per machine (e.g. where each zerk fitting is) with a location note. Photos are saved on-device in IndexedDB and are included in backups.
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.

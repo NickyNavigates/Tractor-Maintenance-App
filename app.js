@@ -40,13 +40,15 @@ const BACKUP_SNOOZE_DAYS = 7;    // how long "Later" hides the reminder
 
 const STORE_KEY = 'shedlog.v1';
 
+const EMPTY_DATA = { equipment: [], records: [], tasks: [], consumables: [], photos: [] };
+
 const Store = {
-  data: { equipment: [], records: [], tasks: [], consumables: [] },
+  data: { equipment: [], records: [], tasks: [], consumables: [], photos: [] },
 
   load() {
     try {
       const raw = localStorage.getItem(STORE_KEY);
-      if (raw) this.data = Object.assign({ equipment: [], records: [], tasks: [], consumables: [] }, JSON.parse(raw));
+      if (raw) this.data = Object.assign({}, EMPTY_DATA, JSON.parse(raw));
     } catch (e) { console.error('load failed', e); }
   },
   save() {
@@ -63,10 +65,13 @@ const Store = {
     this.save();
   },
   deleteEquipment(id) {
+    // remove any stored photo blobs for this equipment (best effort, async)
+    this.data.photos.filter(p => p.equipmentId === id).forEach(p => ImageDB.del(p.id).catch(() => {}));
     this.data.equipment   = this.data.equipment.filter(e => e.id !== id);
     this.data.records     = this.data.records.filter(r => r.equipmentId !== id);
     this.data.tasks       = this.data.tasks.filter(t => t.equipmentId !== id);
     this.data.consumables = this.data.consumables.filter(c => c.equipmentId !== id);
+    this.data.photos      = this.data.photos.filter(p => p.equipmentId !== id);
     this.save();
   },
 
@@ -99,7 +104,79 @@ const Store = {
     this.save();
   },
   deleteConsumable(id) { this.data.consumables = this.data.consumables.filter(c => c.id !== id); this.save(); },
+
+  // photos (reference images with a location/caption, e.g. zerk fittings)
+  photosFor(eqId) { return this.data.photos.filter(p => p.equipmentId === eqId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')); },
+  getPhoto(id) { return this.data.photos.find(p => p.id === id); },
+  addPhoto(p) { this.data.photos.push(p); this.save(); },
+  updatePhoto(p) { const i = this.data.photos.findIndex(x => x.id === p.id); if (i >= 0) this.data.photos[i] = p; this.save(); },
+  deletePhoto(id) { this.data.photos = this.data.photos.filter(p => p.id !== id); ImageDB.del(id).catch(() => {}); this.save(); },
 };
+
+/* IndexedDB store for photo blobs (kept out of localStorage, which is too small for images). */
+const ImageDB = {
+  _db: null,
+  open() {
+    return new Promise((resolve, reject) => {
+      if (this._db) return resolve(this._db);
+      if (!('indexedDB' in window)) return reject(new Error('no indexeddb'));
+      const req = indexedDB.open('shedlog-images', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('img');
+      req.onsuccess = () => { this._db = req.result; resolve(this._db); };
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async put(id, dataUrl) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('img', 'readwrite');
+      tx.objectStore('img').put(dataUrl, id);
+      tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    });
+  },
+  async get(id) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('img', 'readonly');
+      const r = tx.objectStore('img').get(id);
+      r.onsuccess = () => res(r.result || null); r.onerror = () => rej(r.error);
+    });
+  },
+  async del(id) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('img', 'readwrite');
+      tx.objectStore('img').delete(id);
+      tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    });
+  },
+};
+
+// Read an image File, downscale it, and return a compact JPEG data URL.
+function fileToCompressedDataURL(file, maxDim = 1280, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('bad image'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) { height = Math.round(height * maxDim / width); width = maxDim; }
+          else { width = Math.round(width * maxDim / height); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        try { resolve(canvas.toDataURL('image/jpeg', quality)); }
+        catch (e) { reject(e); }
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 /* Backup metadata, kept separate from the data so it never travels inside a backup file. */
 const META_KEY = 'shedlog.meta.v1';
@@ -357,7 +434,12 @@ function renderDashboard(view) {
 async function exportData() {
   const stamp = new Date().toISOString().slice(0, 10);
   const filename = `shedlog-backup-${stamp}.json`;
-  const payload = JSON.stringify({ app: 'ShedLog', version: 1, exportedAt: new Date().toISOString(), ...Store.data }, null, 2);
+  // Pull photo image data out of IndexedDB so backups are complete.
+  const images = {};
+  for (const p of Store.data.photos) {
+    try { const d = await ImageDB.get(p.id); if (d) images[p.id] = d; } catch (e) { /* skip */ }
+  }
+  const payload = JSON.stringify({ app: 'ShedLog', version: 1, exportedAt: new Date().toISOString(), ...Store.data, images }, null, 2);
 
   // Preferred path on iOS: native share sheet with a file attachment.
   try {
@@ -433,19 +515,28 @@ function importData() {
     input.remove();
     if (!f) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const parsed = JSON.parse(reader.result);
         if (!parsed || !Array.isArray(parsed.equipment)) throw new Error('invalid');
-        const counts = `${parsed.equipment.length} item(s), ${(parsed.records || []).length} record(s)`;
+        const photoCount = (parsed.photos || []).length;
+        const counts = `${parsed.equipment.length} item(s), ${(parsed.records || []).length} record(s)`
+          + (photoCount ? `, ${photoCount} photo(s)` : '');
         if (!confirm(`Restore this backup (${counts})?\n\nThis replaces ALL data currently on this device.`)) return;
         Store.data = {
           equipment: parsed.equipment || [],
           records: parsed.records || [],
           tasks: parsed.tasks || [],
           consumables: parsed.consumables || [],
+          photos: parsed.photos || [],
         };
         Store.save();
+        // restore photo image blobs into IndexedDB
+        if (parsed.images) {
+          for (const [id, dataUrl] of Object.entries(parsed.images)) {
+            try { await ImageDB.put(id, dataUrl); } catch (e) { /* skip */ }
+          }
+        }
         toast('Backup restored');
         navigate('#/dashboard');
         router();
@@ -546,8 +637,18 @@ function renderEquipmentDetail(view, id) {
   const actions = el('div', { class: 'stack' },
     el('button', { class: 'btn', onclick: () => openRecordForm(eq.id) }, '＋ Log Maintenance'),
     el('button', { class: 'btn secondary', onclick: () => openTaskForm(eq.id) }, '＋ Add Service Schedule'),
-    el('button', { class: 'btn secondary', onclick: () => openConsumableForm(eq.id) }, '＋ Add Consumable / Part'));
+    el('button', { class: 'btn secondary', onclick: () => openConsumableForm(eq.id) }, '＋ Add Consumable / Part'),
+    el('button', { class: 'btn secondary', onclick: () => addPhotoFlow(eq.id) }, '＋ Add Photo'));
   view.appendChild(actions);
+
+  // Photos & locations (e.g. zerk fittings)
+  const photos = Store.photosFor(eq.id);
+  if (photos.length) {
+    view.appendChild(el('div', { class: 'section-title' }, 'Photos & Locations'));
+    const grid = el('div', { class: 'photo-grid' });
+    photos.forEach(p => grid.appendChild(photoThumb(p)));
+    view.appendChild(grid);
+  }
 
   // Schedules
   const tasks = Store.tasksFor(eq.id)
@@ -721,40 +822,43 @@ function renderShopping(view) {
 
   const low = lowStockConsumables();
   const lowIds = new Set(low.map(c => c.id));
-  const dueIds = equipmentWithDueService();
-  const serviceParts = [];
-  dueIds.forEach(eqId => Store.consumablesFor(eqId).forEach(c => { if (!lowIds.has(c.id)) serviceParts.push(c); }));
+  // Parts needed for upcoming service = parts LINKED to due/overdue schedules (precise).
+  const dueTasks = Store.tasks().filter(t => taskStatus(t).status !== 'ok');
+  const serviceIds = new Set();
+  dueTasks.forEach(t => (t.partIds || []).forEach(id => { if (!lowIds.has(id)) serviceIds.add(id); }));
+  const serviceParts = [...serviceIds].map(id => Store.getConsumable(id)).filter(Boolean);
 
   if (!low.length && !serviceParts.length) {
     emptyState(view, '✅', 'Stock looks good',
-      'Nothing is low and no service-due parts to grab. Set “On hand” and “Reorder at” on a part to track it here, or add service schedules so due parts appear.',
+      'Nothing is low and no service-due parts to grab. Track a part’s “On hand”/“Reorder at”, and link parts to a schedule, so due parts appear here.',
       null);
     return { title: 'Shopping List' };
   }
 
   const total = low.length + serviceParts.length;
+  const estTotal = low.concat(serviceParts).reduce((s, c) => s + (Number(c.unitCost) || 0), 0);
   view.appendChild(el('div', { class: low.length ? 'banner over' : 'banner soon' },
     el('div', { class: 'bignum' }, String(total)),
     el('div', {},
       el('div', { class: 'blabel' }, total === 1 ? '1 item to buy' : `${total} items to buy`),
-      el('div', { class: 'bsub' }, low.length
+      el('div', { class: 'bsub' }, (low.length
         ? `${low.length} low/out` + (serviceParts.length ? ` · ${serviceParts.length} for service` : '')
-        : 'For upcoming service'))));
+        : 'For upcoming service') + (estTotal > 0 ? ` · est. ${fmtMoney(estTotal)}` : '')))));
 
   view.appendChild(el('div', { style: 'margin:10px 0 2px' },
     el('button', { class: 'btn secondary small', style: 'width:auto', onclick: () => shareShoppingList(low, serviceParts) }, '⬆️ Share / Copy list')));
 
   shoppingSection(view, 'Low / Out of Stock', low,
-    c => el('span', { class: 'pill over' }, Number(c.onHand) <= 0 ? 'Out' : `${fmtNum(c.onHand)} left`));
+    c => el('span', { class: 'pill over' }, Number(c.onHand) <= 0 ? 'Out' : `${fmtNum(c.onHand)} left`), true);
   shoppingSection(view, 'For Upcoming Service', serviceParts,
-    c => stockTracked(c) ? el('span', { class: 'pill ok' }, `${fmtNum(c.onHand)} on hand`) : el('span', { class: 'chev' }, '›'));
+    c => stockTracked(c) ? el('span', { class: 'pill ok' }, `${fmtNum(c.onHand)} on hand`) : el('span', { class: 'chev' }, '›'), false);
 
   view.appendChild(el('div', { class: 'center muted', style: 'margin-top:14px;padding:0 16px;line-height:1.4' },
-    'Tap an item to update its on-hand count after you restock.'));
+    'Tap an item to edit it, or use Restock to update its on-hand count.'));
   return { title: 'Shopping List' };
 }
 
-function shoppingSection(view, heading, items, pillFor) {
+function shoppingSection(view, heading, items, pillFor, withRestock) {
   if (!items.length) return;
   const sorted = items.slice().sort((a, b) => {
     const ea = Store.getEquipment(a.equipmentId), eb = Store.getEquipment(b.equipmentId);
@@ -770,14 +874,115 @@ function shoppingSection(view, heading, items, pillFor) {
     const sub = [eq ? eq.name : ''];
     if (c.partNumber) sub.push('#' + c.partNumber);
     if (c.qty) sub.push(c.qty);
+    if (Number(c.unitCost) > 0) sub.push(fmtMoney(c.unitCost));
     card.appendChild(el('div', { class: 'row', onclick: () => openConsumableForm(c.equipmentId, c) },
       el('span', { class: 'emoji' }, type.emoji),
       el('div', { class: 'grow' },
         el('div', { class: 'primary' }, c.spec || type.label),
         el('div', { class: 'secondary' }, sub.filter(Boolean).join(' · '))),
-      pillFor(c)));
+      pillFor(c),
+      withRestock ? el('button', { class: 'btn small secondary', style: 'padding:7px 11px;margin-left:8px',
+        onclick: (e) => { e.stopPropagation(); openRestock(c); } }, 'Restock') : null));
   });
   view.appendChild(card);
+}
+
+// Quick on-hand update from the shopping list.
+function openRestock(c) {
+  const eq = Store.getEquipment(c.equipmentId);
+  const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
+  openModal((sheet) => {
+    const n = el('input', { type: 'number', value: c.onHand === '' ? '' : c.onHand, inputmode: 'decimal', step: 'any', placeholder: '0' });
+    const bump = (d) => { n.value = String((Number(n.value) || 0) + d); };
+    const save = () => {
+      c.onHand = n.value === '' ? '' : Number(n.value);
+      Store.upsertConsumable(c);
+      closeModal(); toast('Stock updated'); router();
+    };
+    sheet.append(
+      sheetHead('Restock', save),
+      el('div', { class: 'muted', style: 'margin:0 4px 12px' }, `${type.emoji} ${c.spec || type.label}${eq ? ' · ' + eq.name : ''}`),
+      field('On hand now', n, 'Set how many you have after restocking.'),
+      el('div', { class: 'seg' },
+        el('button', { onclick: () => bump(1) }, '+1'),
+        el('button', { onclick: () => bump(5) }, '+5'),
+        el('button', { onclick: () => bump(10) }, '+10')),
+    );
+  });
+}
+
+/* ------------------------------ Photos ------------------------------- */
+
+function photoThumb(p) {
+  const img = el('img', { alt: p.caption || 'photo', loading: 'lazy' });
+  ImageDB.get(p.id).then(d => { if (d) img.src = d; }).catch(() => {});
+  return el('div', { class: 'photo-tile', onclick: () => openPhotoView(p) },
+    img,
+    p.caption ? el('div', { class: 'photo-cap' }, p.caption) : null);
+}
+
+// Take/choose a photo, downscale it, then open the editor to add a location note.
+function addPhotoFlow(eqId) {
+  const input = el('input', { type: 'file', accept: 'image/*', capture: 'environment', style: 'display:none' });
+  document.body.appendChild(input);
+  input.addEventListener('change', async () => {
+    const f = input.files && input.files[0];
+    input.remove();
+    if (!f) return;
+    toast('Processing photo…');
+    try {
+      const dataUrl = await fileToCompressedDataURL(f);
+      openPhotoEditor(eqId, null, dataUrl);
+    } catch (e) { alert('Could not read that image.'); }
+  });
+  input.click();
+}
+
+function openPhotoEditor(eqId, existing, newDataUrl) {
+  openModal((sheet) => {
+    const capI = el('input', { type: 'text', value: existing?.caption || '', placeholder: 'e.g. Front axle zerk — behind LH wheel' });
+    const preview = el('img', { class: 'photo-preview' });
+    if (newDataUrl) preview.src = newDataUrl;
+    else if (existing) ImageDB.get(existing.id).then(d => { if (d) preview.src = d; }).catch(() => {});
+
+    const save = async () => {
+      if (existing) {
+        existing.caption = capI.value.trim();
+        Store.updatePhoto(existing);
+      } else {
+        const id = uid();
+        try { await ImageDB.put(id, newDataUrl); }
+        catch (e) { alert('Could not save the photo on this device.'); return; }
+        Store.addPhoto({ id, equipmentId: eqId, caption: capI.value.trim(), createdAt: new Date().toISOString() });
+      }
+      closeModal(); toast('Photo saved'); router();
+    };
+
+    sheet.append(
+      sheetHead(existing ? 'Edit Photo' : 'New Photo', save),
+      preview,
+      el('div', { class: 'spacer' }),
+      field('Location / note', capI, 'Describe where this is so you can find it later.'),
+      existing ? el('button', { class: 'btn danger', onclick: () => {
+        if (confirm('Delete this photo?')) { Store.deletePhoto(existing.id); closeModal(); toast('Photo deleted'); router(); }
+      } }, 'Delete Photo') : null,
+    );
+  });
+}
+
+function openPhotoView(p) {
+  openModal((sheet) => {
+    const img = el('img', { class: 'photo-preview' });
+    ImageDB.get(p.id).then(d => { if (d) img.src = d; }).catch(() => {});
+    sheet.append(
+      el('div', { class: 'sheet-head' },
+        el('button', { class: 'link plain', onclick: () => { closeModal(); openPhotoEditor(p.equipmentId, p, null); } }, 'Edit'),
+        el('h3', {}, 'Photo'),
+        el('button', { class: 'link plain', onclick: closeModal }, 'Done')),
+      img,
+      p.caption ? el('div', { class: 'card', style: 'padding:14px;font-size:15px;line-height:1.4;margin-top:12px' }, p.caption) : null,
+    );
+  });
 }
 
 async function shareShoppingList(low, serviceParts) {
@@ -907,6 +1112,31 @@ function openEquipmentForm(existing) {
   });
 }
 
+/* Reusable checklist of an equipment's consumables; returns the node + a getter for selected ids. */
+function partsChecklist(eqId, preselected) {
+  const set = new Set(preselected || []);
+  const items = Store.consumablesFor(eqId).slice()
+    .sort((a, b) => CONSUMABLE_ORDER.indexOf(a.type) - CONSUMABLE_ORDER.indexOf(b.type));
+  if (!items.length) {
+    return { node: el('div', { class: 'muted', style: 'padding:2px 4px 6px' },
+      'No parts saved for this machine yet — add consumables to link them here.'), getSelected: () => [] };
+  }
+  const card = el('div', { class: 'card' });
+  const controls = items.map(c => {
+    const type = CONSUMABLE_TYPES[c.type] || CONSUMABLE_TYPES.other;
+    const chk = el('input', { type: 'checkbox', checked: set.has(c.id), style: 'width:auto;transform:scale(1.25)' });
+    const label = (c.spec || type.label) + (c.partNumber ? ` · #${c.partNumber}` : '');
+    card.appendChild(el('div', { class: 'row', style: 'cursor:pointer;gap:10px',
+      onclick: (e) => { if (e.target !== chk) chk.checked = !chk.checked; } },
+      chk,
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary', style: 'font-size:15px' }, `${type.emoji}  ${label}`),
+        el('div', { class: 'secondary' }, type.label))));
+    return { c, chk };
+  });
+  return { node: card, getSelected: () => controls.filter(x => x.chk.checked).map(x => x.c.id) };
+}
+
 /* ---- Service schedule (task) form ---- */
 function openTaskForm(eqId, existing) {
   const eq = Store.getEquipment(eqId);
@@ -914,9 +1144,10 @@ function openTaskForm(eqId, existing) {
   const task = existing || {
     id: uid(), equipmentId: eqId, title: '',
     intervalType: eq.usageUnit === 'none' ? 'days' : 'usage',
-    intervalValue: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0,
+    intervalValue: '', lastDoneDate: todayISO(), lastDoneUsage: eq.currentUsage || 0, partIds: [],
   };
   let intervalType = task.intervalType;
+  const parts = partsChecklist(eqId, task.partIds);
 
   openModal((sheet) => {
     const titleI = el('input', { type: 'text', value: task.title, placeholder: 'e.g. Engine oil & filter' });
@@ -966,6 +1197,7 @@ function openTaskForm(eqId, existing) {
         intervalValue: Number(valueI.value),
         lastDoneDate: lastDateI.value || todayISO(),
         lastDoneUsage: intervalType === 'usage' ? Number(lastUsageI.value || 0) : (task.lastDoneUsage ?? 0),
+        partIds: parts.getSelected(),
       });
       closeModal();
       toast(isEdit ? 'Schedule saved' : 'Schedule added');
@@ -979,6 +1211,10 @@ function openTaskForm(eqId, existing) {
       valueField,
       lastDateField,
       canUsage ? lastUsageField : null,
+      el('div', { class: 'field' },
+        el('label', {}, 'Parts this service needs'),
+        parts.node,
+        el('div', { class: 'hint' }, 'Linked parts are pre-checked when you log this service, and listed under it on the Shopping List.')),
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
         if (confirm('Delete this schedule?')) { Store.deleteTask(task.id); closeModal(); toast('Schedule deleted'); router(); }
       } }, 'Delete Schedule') : null,
@@ -989,7 +1225,7 @@ function openTaskForm(eqId, existing) {
 /* ---- Consumable / part form ---- */
 function openConsumableForm(eqId, existing) {
   const isEdit = !!existing;
-  const c = existing || { id: uid(), equipmentId: eqId, type: 'oil', spec: '', partNumber: '', qty: '', onHand: '', reorderAt: '', notes: '' };
+  const c = existing || { id: uid(), equipmentId: eqId, type: 'oil', spec: '', partNumber: '', qty: '', onHand: '', reorderAt: '', unitCost: '', notes: '' };
   let selectedType = c.type || 'oil';
 
   openModal((sheet) => {
@@ -998,6 +1234,7 @@ function openConsumableForm(eqId, existing) {
     const qtyI = el('input', { type: 'text', value: c.qty || '', placeholder: 'e.g. 8.5 qt, 2 ea, 1/2" x 48"' });
     const onHandI = el('input', { type: 'number', value: c.onHand ?? '', placeholder: 'e.g. 2', inputmode: 'decimal', step: 'any' });
     const reorderI = el('input', { type: 'number', value: c.reorderAt ?? '', placeholder: 'e.g. 1', inputmode: 'decimal', step: 'any' });
+    const costI = el('input', { type: 'number', value: c.unitCost ?? '', placeholder: '0.00', inputmode: 'decimal', step: 'any' });
     const notesI = el('textarea', { placeholder: 'Where it goes, brand preference, source…' }, c.notes || '');
 
     const specField = field('Spec / name', specI, 'The grade, size, or product — what to buy.');
@@ -1034,6 +1271,7 @@ function openConsumableForm(eqId, existing) {
         qty: qtyI.value.trim(),
         onHand: onHandI.value === '' ? '' : Number(onHandI.value),
         reorderAt: reorderI.value === '' ? '' : Number(reorderI.value),
+        unitCost: costI.value === '' ? '' : Number(costI.value),
         notes: notesI.value.trim(),
       });
       closeModal();
@@ -1051,6 +1289,7 @@ function openConsumableForm(eqId, existing) {
       el('div', { class: 'field inline2' },
         el('div', {}, el('label', {}, 'On hand'), onHandI),
         el('div', {}, el('label', {}, 'Reorder at'), reorderI)),
+      field('Unit cost', costI, 'Optional — used to estimate shopping totals.'),
       el('div', { class: 'hint', style: 'margin:-8px 4px 14px' }, 'Leave “On hand” blank to skip stock tracking. You’ll get a shopping-list alert when on-hand drops to the reorder level (or to 0).'),
       field('Notes', notesI),
       isEdit ? el('button', { class: 'btn danger', onclick: () => {
@@ -1084,18 +1323,10 @@ function openTaskActions(task) {
   });
 }
 
-// Marking done logs a record and resets the schedule's "last done" markers.
+// Marking done opens the log form pre-tied to this schedule (prefills title,
+// pre-checks its linked parts, and resets the schedule's countdown on save).
 function markTaskDone(task) {
-  const eq = Store.getEquipment(task.equipmentId);
-  openRecordForm(eq.id, {
-    title: task.title,
-    prefillUsage: eq.currentUsage || 0,
-    onSaved: (rec) => {
-      task.lastDoneDate = rec.date;
-      if (task.intervalType === 'usage') task.lastDoneUsage = Number(rec.usageAtService || eq.currentUsage || 0);
-      Store.upsertTask(task);
-    }
-  });
+  openRecordForm(task.equipmentId, { taskId: task.id, prefillUsage: Store.getEquipment(task.equipmentId)?.currentUsage || 0 });
 }
 
 /* ---- Maintenance record form ---- */
@@ -1132,6 +1363,26 @@ function openRecordForm(eqId, opts = {}) {
       return { c, chk, qtyN, row };
     });
 
+    // Optional: tie this entry to one of the equipment's schedules.
+    const tasks = Store.tasksFor(eqId);
+    let selectedTaskId = opts.taskId || '';
+    const setPartChecked = (cid, on) => {
+      const pc = partControls.find(x => x.c.id === cid);
+      if (pc) { pc.chk.checked = on; pc.qtyN.disabled = !on; }
+    };
+    const applyTask = (tid) => {
+      const t = tasks.find(x => x.id === tid);
+      if (!t) return;
+      titleI.value = t.title;
+      (t.partIds || []).forEach(cid => setPartChecked(cid, true));
+    };
+    const schedSelect = el('select', {},
+      el('option', { value: '' }, '— General / no schedule —'),
+      ...tasks.map(t => el('option', { value: t.id }, t.title)));
+    schedSelect.value = selectedTaskId;
+    schedSelect.addEventListener('change', () => { selectedTaskId = schedSelect.value; applyTask(selectedTaskId); });
+    if (selectedTaskId) applyTask(selectedTaskId);
+
     const save = () => {
       if (!titleI.value.trim()) { toast('Enter what was done'); titleI.focus(); return; }
       const partsUsed = [];
@@ -1151,6 +1402,7 @@ function openRecordForm(eqId, opts = {}) {
         notes: notesI.value.trim(),
       };
       if (partsUsed.length) rec.partsUsed = partsUsed;
+      if (selectedTaskId) rec.taskId = selectedTaskId;
       Store.addRecord(rec);
       // deduct used parts from on-hand stock
       partsUsed.forEach(pu => {
@@ -1160,6 +1412,15 @@ function openRecordForm(eqId, opts = {}) {
           Store.upsertConsumable(c);
         }
       });
+      // if tied to a schedule, mark it done and reset its countdown
+      if (selectedTaskId) {
+        const t = Store.getTask(selectedTaskId);
+        if (t) {
+          t.lastDoneDate = rec.date;
+          if (t.intervalType === 'usage') t.lastDoneUsage = Number(rec.usageAtService || eq.currentUsage || 0);
+          Store.upsertTask(t);
+        }
+      }
       // optionally roll the equipment's current usage forward
       if (eq.usageUnit !== 'none' && updateUsageChk.checked && rec.usageAtService !== '' &&
           Number(rec.usageAtService) > Number(eq.currentUsage || 0)) {
@@ -1175,6 +1436,7 @@ function openRecordForm(eqId, opts = {}) {
     sheet.append(
       sheetHead('Log Maintenance', save),
       el('div', { class: 'muted', style: 'margin:0 4px 12px' }, eq.name),
+      tasks.length ? field('For schedule', schedSelect, 'Pick a schedule to prefill this and mark it done.') : null,
       field('What was done', titleI),
       field('Date', dateI),
       eq.usageUnit !== 'none' ? field(`${unit.charAt(0).toUpperCase() + unit.slice(1)} reading`, usageI) : null,
