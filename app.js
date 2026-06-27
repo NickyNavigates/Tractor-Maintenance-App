@@ -211,7 +211,7 @@ function fileToCompressedDataURL(file, maxDim = 1280, quality = 0.72) {
 /* Backup metadata, kept separate from the data so it never travels inside a backup file. */
 const META_KEY = 'shedlog.meta.v1';
 const Meta = {
-  data: { lastBackupAt: null, snoozeUntil: null },
+  data: { lastBackupAt: null, snoozeUntil: null, notify: false, lastNotifyDate: null },
   load() {
     try {
       const raw = localStorage.getItem(META_KEY);
@@ -309,6 +309,46 @@ function allTasksRanked() {
     .sort((a, b) => a.st.sort - b.st.sort);
 }
 
+/* ----------------------------- Reminders ----------------------------- */
+
+function overdueCount() { return Store.tasks().filter(t => taskStatus(t).status === 'over').length; }
+
+// Put a count of overdue items on the installed app's home-screen icon.
+function updateBadge() {
+  try {
+    const n = overdueCount();
+    if ('setAppBadge' in navigator) {
+      if (n > 0) navigator.setAppBadge(n); else navigator.clearAppBadge();
+    }
+  } catch (e) { /* unsupported */ }
+}
+
+// Turn maintenance reminders on/off (asks for notification permission).
+async function setNotifications(on) {
+  if (!on) { Meta.data.notify = false; Meta.save(); try { navigator.clearAppBadge && navigator.clearAppBadge(); } catch (e) {} return false; }
+  if (!('Notification' in window)) { toast('Notifications not supported here'); return false; }
+  let perm = Notification.permission;
+  if (perm === 'default') { try { perm = await Notification.requestPermission(); } catch (e) { perm = 'denied'; } }
+  if (perm !== 'granted') { toast('Allow notifications in Settings to enable'); return false; }
+  Meta.data.notify = true; Meta.save();
+  updateBadge(); maybeNotify(); return true;
+}
+
+// When the app opens (or returns to foreground), nudge about overdue work — once per day.
+async function maybeNotify() {
+  if (!Meta.data.notify || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const n = overdueCount();
+  if (!n) return;
+  if (Meta.data.lastNotifyDate === todayISO()) return;
+  Meta.data.lastNotifyDate = todayISO(); Meta.save();
+  const body = n === 1 ? '1 maintenance task is overdue.' : `${n} maintenance tasks are overdue.`;
+  try {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.ready;
+    if (reg && reg.showNotification) await reg.showNotification('Tractor Shed', { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: 'shedlog-due' });
+    else new Notification('Tractor Shed', { body });
+  } catch (e) { /* ignore */ }
+}
+
 /* ------------------------------ Routing ------------------------------ */
 
 const routes = {
@@ -366,6 +406,8 @@ function router() {
   // shopping tab low-stock indicator dot
   const dot = $('.tab[data-route="#/shopping"] .dot');
   if (dot) dot.hidden = lowStockConsumables().length === 0;
+
+  updateBadge();
 }
 
 /* ------------------------------ Views -------------------------------- */
@@ -439,6 +481,23 @@ function renderDashboard(view) {
   const eqCard = el('div', { class: 'card' });
   eqs.forEach(eq => eqCard.appendChild(equipmentRow(eq)));
   view.appendChild(eqCard);
+
+  // Reminders
+  view.appendChild(el('div', { class: 'section-title' }, 'Reminders'));
+  const notifChk = el('input', { type: 'checkbox', checked: !!Meta.data.notify });
+  notifChk.addEventListener('change', async () => {
+    const ok = await setNotifications(notifChk.checked);
+    notifChk.checked = ok;
+  });
+  view.appendChild(el('div', { class: 'card' },
+    el('div', { class: 'row', style: 'cursor:default' },
+      el('span', { class: 'emoji' }, '🔔'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, 'Maintenance reminders'),
+        el('div', { class: 'secondary' }, 'Badge the app icon + notify when service is due')),
+      notifChk)));
+  view.appendChild(el('div', { class: 'center muted', style: 'margin-top:8px;padding:0 16px;line-height:1.4' },
+    'Reminders update when you open the app — it badges the icon with overdue items and notifies you once a day. (Background alerts aren’t possible without an internet account.)'));
 
   // Data & backup
   view.appendChild(el('div', { class: 'section-title' }, 'Data & Backup'));
@@ -633,25 +692,103 @@ function renderEquipmentList(view) {
       'Add Equipment', () => openEquipmentForm());
     return { title: 'Equipment' };
   }
-  CATEGORY_ORDER.forEach(cat => {
-    const inCat = eqs.filter(e => e.category === cat);
-    if (!inCat.length) return;
-    view.appendChild(el('div', { class: 'section-title' },
-      `${CATEGORIES[cat].emoji} ${CATEGORIES[cat].label}s`));
-    const card = el('div', { class: 'card' });
-    inCat.forEach(eq => card.appendChild(equipmentRow(eq)));
-    view.appendChild(card);
-  });
-  // Entry to the global parts list
-  view.appendChild(el('div', { class: 'spacer' }));
-  view.appendChild(el('div', { class: 'card' },
-    el('div', { class: 'row', onclick: () => navigate('#/parts') },
-      el('span', { class: 'emoji' }, '🧰'),
-      el('div', { class: 'grow' },
-        el('div', { class: 'primary' }, 'All Parts'),
-        el('div', { class: 'secondary' }, `${Store.data.consumables.length} part(s) across all equipment`)),
-      el('span', { class: 'chev' }, '›'))));
+
+  // Search box (searches across equipment, parts, schedules, manuals, photos)
+  const searchI = el('input', { type: 'search', class: 'search-input', placeholder: 'Search equipment, parts, schedules…', enterkeyhint: 'search' });
+  view.appendChild(el('div', { class: 'search-wrap' }, searchI));
+  const results = el('div', {});
+  view.appendChild(results);
+
+  const renderBody = (q) => {
+    results.innerHTML = '';
+    if (q) { renderSearchResults(results, q); return; }
+    CATEGORY_ORDER.forEach(cat => {
+      const inCat = eqs.filter(e => e.category === cat);
+      if (!inCat.length) return;
+      results.appendChild(el('div', { class: 'section-title' },
+        `${CATEGORIES[cat].emoji} ${CATEGORIES[cat].label}s`));
+      const card = el('div', { class: 'card' });
+      inCat.forEach(eq => card.appendChild(equipmentRow(eq)));
+      results.appendChild(card);
+    });
+    results.appendChild(el('div', { class: 'spacer' }));
+    results.appendChild(el('div', { class: 'card' },
+      el('div', { class: 'row', onclick: () => navigate('#/parts') },
+        el('span', { class: 'emoji' }, '🧰'),
+        el('div', { class: 'grow' },
+          el('div', { class: 'primary' }, 'All Parts'),
+          el('div', { class: 'secondary' }, `${Store.data.consumables.length} part(s) across all equipment`)),
+        el('span', { class: 'chev' }, '›'))));
+  };
+
+  searchI.addEventListener('input', () => renderBody(searchI.value.trim().toLowerCase()));
+  renderBody('');
   return { title: 'Equipment' };
+}
+
+// Build grouped search results across all record types.
+function renderSearchResults(container, q) {
+  const match = (...vals) => vals.some(v => v && String(v).toLowerCase().includes(q));
+  const eqName = (id) => Store.getEquipment(id)?.name || '';
+  let groups = 0;
+  const section = (title, rows) => {
+    if (!rows.length) return;
+    groups++;
+    container.appendChild(el('div', { class: 'section-title' }, `${title} · ${rows.length}`));
+    const card = el('div', { class: 'card' });
+    rows.forEach(r => card.appendChild(r));
+    container.appendChild(card);
+  };
+
+  // Equipment
+  section('Equipment', Store.equipment()
+    .filter(e => match(e.name, e.make, e.model, e.identifier, e.notes, CATEGORIES[e.category].label))
+    .map(e => equipmentRow(e)));
+
+  // Parts
+  section('Parts', Store.data.consumables
+    .filter(c => match(c.spec, c.partNumber, c.qty, c.notes, CONSUMABLE_TYPES[c.type]?.label, eqName(c.equipmentId)))
+    .map(c => consumableRow(c)));
+
+  // Schedules
+  section('Schedules', Store.tasks()
+    .filter(t => match(t.title, t.instructions, eqName(t.equipmentId)))
+    .map(t => {
+      const eq = Store.getEquipment(t.equipmentId);
+      const st = taskStatus(t);
+      return el('div', { class: 'row', onclick: () => openTaskActions(t) },
+        el('span', { class: 'emoji' }, eq ? CATEGORIES[eq.category].emoji : '🔧'),
+        el('div', { class: 'grow' },
+          el('div', { class: 'primary' }, t.title),
+          el('div', { class: 'secondary' }, `${eq ? eq.name : ''} · next ${st.due}`)),
+        statusPill(st));
+    }));
+
+  // Documents
+  section('Documents', Store.data.manuals
+    .filter(m => match(m.name, eqName(m.equipmentId)))
+    .map(m => el('div', { class: 'row', onclick: () => openManualActions(m) },
+      el('span', { class: 'emoji' }, '📄'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, m.name || 'Document'),
+        el('div', { class: 'secondary' }, eqName(m.equipmentId))),
+      el('span', { class: 'chev' }, '›'))));
+
+  // Photos (by caption)
+  section('Photos', Store.data.photos
+    .filter(p => match(p.caption, eqName(p.equipmentId)))
+    .map(p => el('div', { class: 'row', onclick: () => openPhotoView(p) },
+      p.id ? miniThumb(p.id) : el('span', { class: 'emoji' }, '📷'),
+      el('div', { class: 'grow' },
+        el('div', { class: 'primary' }, p.caption || 'Photo'),
+        el('div', { class: 'secondary' }, eqName(p.equipmentId))))));
+
+  if (!groups) {
+    container.appendChild(el('div', { class: 'empty', style: 'padding:48px 24px' },
+      el('div', { class: 'ei' }, '🔍'),
+      el('h2', {}, 'No matches'),
+      el('p', {}, `Nothing found for “${q}”.`)));
+  }
 }
 
 // Global, editable list of every part across all equipment.
@@ -1748,6 +1885,11 @@ function init() {
   window.addEventListener('hashchange', router);
   if (!location.hash) location.hash = '#/dashboard';
   router();
+
+  // Reminders: badge the icon and nudge about overdue work on open / return.
+  updateBadge();
+  maybeNotify();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { updateBadge(); maybeNotify(); } });
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {

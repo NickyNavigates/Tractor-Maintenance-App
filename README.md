@@ -68,6 +68,8 @@ Any static web host works (Netlify, Vercel, Cloudflare Pages, or even a folder o
 - **Photos & locations** — snap reference photos for **equipment, individual schedules, or individual parts** (e.g. where each zerk fitting is) with a location note. A part's photo appears as a thumbnail in the parts lists. Saved on-device in IndexedDB and included in backups.
 - **Manuals & documents** — store operator/parts manuals (PDF or image) per machine; tap to open, rename, or delete. Included in backups. The equipment page shows photo and document counts.
 - **All Parts list** — one editable list of every part across all your equipment, reachable from the Equipment tab.
+- **Search** — the Equipment tab has a search box that finds matches across equipment, parts (incl. part numbers), schedules, documents, and photo captions, grouped and tappable.
+- **Reminders** — opt-in maintenance reminders badge the home-screen icon with the number of overdue items and send a once-a-day notification when you open the app. (Background push needs an internet account/server, so reminders refresh on open.)
 - **Maintenance log** — record what was done, the date, the hour/mile reading, cost, and notes. Logging service against a schedule resets its countdown automatically.
 - **Dashboard** — a single screen showing everything that needs attention, ranked by urgency.
 - **History** — a full, searchable-by-month service record across all your equipment, with total spend.

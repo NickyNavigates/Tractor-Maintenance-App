@@ -88,6 +88,12 @@ body {
 .tab .dot[hidden] { display: none; }
 
 /* Sections & cards */
+.search-wrap { padding: 4px 0 2px; }
+.search-input { width: 100%; background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px 14px; font-size: 16px; color: var(--text); font-family: inherit;
+  -webkit-appearance: none; appearance: none; }
+.search-input::placeholder { color: var(--text-2); }
+
 .section-title { font-size: 13px; font-weight: 600; color: var(--text-2);
   text-transform: uppercase; letter-spacing: 0.4px; margin: 18px 4px 8px; }
 .card {
