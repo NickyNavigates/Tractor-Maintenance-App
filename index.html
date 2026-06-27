@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#2e7d32" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="ShedLog" />
+  <title>ShedLog — Maintenance Tracker</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="appbar">
+      <button id="backBtn" class="iconbtn" aria-label="Back" hidden>‹</button>
+      <h1 id="title">Dashboard</h1>
+      <button id="addBtn" class="iconbtn" aria-label="Add">+</button>
+    </header>
+
+    <main id="view"><!-- rendered by app.js --></main>
+
+    <nav id="tabbar">
+      <button class="tab" data-route="#/dashboard">
+        <span class="tabicon">▩</span><span class="tablabel">Dashboard</span>
+      </button>
+      <button class="tab" data-route="#/equipment">
+        <span class="tabicon">⚙</span><span class="tablabel">Equipment</span>
+      </button>
+      <button class="tab" data-route="#/history">
+        <span class="tabicon">≣</span><span class="tablabel">History</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Modal host for forms -->
+  <div id="modal" class="modal" hidden>
+    <div class="sheet" id="sheet"></div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
